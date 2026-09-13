@@ -81,6 +81,22 @@ et sont triées par `updated_at` croissant, pour permettre à un consommateur
 de mémoriser un simple curseur (`modifie_depuis`) plutôt que de tout
 re-scanner à chaque appel.
 
+## Champs d'identité complémentaires (ajoutés après la v2 du prompt)
+
+En plus du dossier décrit dans `prompt-simulateur-imf-v2.md`, le client
+porte désormais :
+
+- **Situation familiale** : `situation_matrimoniale` (`celibataire` /
+  `marie` / `divorce` / `veuf` / `union_libre`), `nom_conjoint`, `nom_pere`,
+  `profession_pere`, `nom_mere`, `profession_mere` — tous facultatifs,
+  aucune contrainte ne lie `nom_conjoint` à `situation_matrimoniale`.
+- **Coordonnées GPS** : `coordonnees_gps` (`{ latitude, longitude }`),
+  facultatif.
+- **Revenus mensuels estimés en plage** : `activite_professionnelle`
+  expose désormais `revenus_mensuels_min` / `revenus_mensuels_max` (au
+  lieu d'un montant unique `revenus_mensuels_estimes`) ; une erreur 422
+  est renvoyée si le minimum dépasse le maximum.
+
 ## Décisions prises sur les points laissés ouverts dans le prompt
 
 Le prompt listait plusieurs points « à valider ». Pour permettre un

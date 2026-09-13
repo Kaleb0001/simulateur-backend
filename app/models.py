@@ -28,11 +28,24 @@ class Client(Base):
     email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     agence: Mapped[str] = mapped_column(String(120))
 
+    # Situation familiale
+    situation_matrimoniale: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    nom_conjoint: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    nom_pere: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    profession_pere: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    nom_mere: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    profession_mere: Mapped[str | None] = mapped_column(String(120), nullable=True)
+
+    # Coordonnees GPS
+    latitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    longitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+
     # Secteur et activite professionnelle
     secteur_activite: Mapped[str | None] = mapped_column(String(120), nullable=True)
     profession: Mapped[str | None] = mapped_column(String(120), nullable=True)
     employeur: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    revenus_mensuels_estimes: Mapped[float | None] = mapped_column(Float, nullable=True)
+    revenus_mensuels_min: Mapped[float | None] = mapped_column(Float, nullable=True)
+    revenus_mensuels_max: Mapped[float | None] = mapped_column(Float, nullable=True)
     devise_revenus: Mapped[str | None] = mapped_column(String(8), nullable=True)
     source_revenus: Mapped[str | None] = mapped_column(String(120), nullable=True)
     autres_sources_revenus: Mapped[str | None] = mapped_column(String(255), nullable=True)

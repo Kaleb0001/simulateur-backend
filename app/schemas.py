@@ -1,7 +1,7 @@
 from datetime import date, datetime
 from enum import Enum
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 # --------------------------------------------------------------------------
@@ -37,6 +37,14 @@ class TypeOperation(str, Enum):
     virement = "virement"
 
 
+class SituationMatrimoniale(str, Enum):
+    celibataire = "celibataire"
+    marie = "marie"
+    divorce = "divorce"
+    veuf = "veuf"
+    union_libre = "union_libre"
+
+
 # --------------------------------------------------------------------------
 # Blocs imbriques reutilisables
 # --------------------------------------------------------------------------
@@ -47,15 +55,33 @@ class PieceIdentite(BaseModel):
     numero: str
 
 
+class CoordonneesGPS(BaseModel):
+    latitude: float = Field(ge=-90, le=90)
+    longitude: float = Field(ge=-180, le=180)
+
+
 class ActiviteProfessionnelle(BaseModel):
     secteur_activite: str | None = None
     profession: str | None = None
     employeur: str | None = None
-    revenus_mensuels_estimes: float | None = None
+    revenus_mensuels_min: float | None = Field(default=None, ge=0)
+    revenus_mensuels_max: float | None = Field(default=None, ge=0)
     devise_revenus: str | None = None
     source_revenus: str | None = None
     autres_sources_revenus: str | None = None
     objet_relation: str | None = None
+
+    @model_validator(mode="after")
+    def _verifier_plage_revenus(self) -> "ActiviteProfessionnelle":
+        if (
+            self.revenus_mensuels_min is not None
+            and self.revenus_mensuels_max is not None
+            and self.revenus_mensuels_min > self.revenus_mensuels_max
+        ):
+            raise ValueError(
+                "revenus_mensuels_min ne peut pas être supérieur à revenus_mensuels_max."
+            )
+        return self
 
 
 class AutoDeclarationPPE(BaseModel):
@@ -232,6 +258,15 @@ class ClientBase(BaseModel):
     email: str | None = None
     agence: str
 
+    situation_matrimoniale: SituationMatrimoniale | None = None
+    nom_conjoint: str | None = None
+    nom_pere: str | None = None
+    profession_pere: str | None = None
+    nom_mere: str | None = None
+    profession_mere: str | None = None
+
+    coordonnees_gps: CoordonneesGPS | None = None
+
     activite_professionnelle: ActiviteProfessionnelle = Field(
         default_factory=ActiviteProfessionnelle
     )
@@ -271,6 +306,15 @@ class ClientUpdate(BaseModel):
     email: str | None = None
     agence: str | None = None
 
+    situation_matrimoniale: SituationMatrimoniale | None = None
+    nom_conjoint: str | None = None
+    nom_pere: str | None = None
+    profession_pere: str | None = None
+    nom_mere: str | None = None
+    profession_mere: str | None = None
+
+    coordonnees_gps: CoordonneesGPS | None = None
+
     activite_professionnelle: ActiviteProfessionnelle | None = None
 
     canal_entree_relation: CanalEntreeRelation | None = None
@@ -294,6 +338,15 @@ class ClientRead(BaseModel):
     telephone: str
     email: str | None = None
     agence: str
+
+    situation_matrimoniale: SituationMatrimoniale | None = None
+    nom_conjoint: str | None = None
+    nom_pere: str | None = None
+    profession_pere: str | None = None
+    nom_mere: str | None = None
+    profession_mere: str | None = None
+
+    coordonnees_gps: CoordonneesGPS | None = None
 
     activite_professionnelle: ActiviteProfessionnelle
     beneficiaires_effectifs: list[BeneficiaireEffectifRead]

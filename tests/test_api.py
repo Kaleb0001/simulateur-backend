@@ -15,11 +15,19 @@ CLIENT_PAYLOAD = {
     "telephone": "+22890123456",
     "email": "kodjo.mensah@example.com",
     "agence": "Lomé-Centre",
+    "situation_matrimoniale": "marie",
+    "nom_conjoint": "Afiwa Mensah",
+    "nom_pere": "Kwame Mensah",
+    "profession_pere": "Agriculteur",
+    "nom_mere": "Akossiwa Mensah",
+    "profession_mere": "Commerçante",
+    "coordonnees_gps": {"latitude": 6.1319, "longitude": 1.2228},
     "activite_professionnelle": {
         "secteur_activite": "Commerce",
         "profession": "Commerçante",
         "employeur": "Indépendante",
-        "revenus_mensuels_estimes": 350000,
+        "revenus_mensuels_min": 300000,
+        "revenus_mensuels_max": 400000,
         "devise_revenus": "XOF",
         "source_revenus": "Activité commerciale",
         "objet_relation": "Épargne et financement de stock",
@@ -58,7 +66,16 @@ def test_creation_client_avec_compte_auto_cree(client):
     assert data["nom"] == "Kodjo"
     assert data["statut"] == "actif"
     assert data["piece_identite"] == {"type": "CNI", "numero": "TG-0192837"}
+    assert data["situation_matrimoniale"] == "marie"
+    assert data["nom_conjoint"] == "Afiwa Mensah"
+    assert data["nom_pere"] == "Kwame Mensah"
+    assert data["profession_pere"] == "Agriculteur"
+    assert data["nom_mere"] == "Akossiwa Mensah"
+    assert data["profession_mere"] == "Commerçante"
+    assert data["coordonnees_gps"] == {"latitude": 6.1319, "longitude": 1.2228}
     assert data["activite_professionnelle"]["secteur_activite"] == "Commerce"
+    assert data["activite_professionnelle"]["revenus_mensuels_min"] == 300000
+    assert data["activite_professionnelle"]["revenus_mensuels_max"] == 400000
     assert len(data["documents"]) == 1
     assert data["documents"][0]["type_document"] == "CNI"
     assert len(data["comptes"]) == 1
@@ -110,6 +127,27 @@ def test_modifier_client(client):
     assert data["activite_professionnelle"]["profession"] == "Grossiste"
     # Les autres champs de l'activité professionnelle imbriquée restent en place.
     assert data["activite_professionnelle"]["secteur_activite"] == "Commerce"
+
+
+def test_modifier_coordonnees_gps(client):
+    response = client.put(
+        f"/api/v1/clients/{CLIENT_EXTERNAL_ID}",
+        json={"coordonnees_gps": {"latitude": 6.14, "longitude": 1.21}},
+        headers=HEADERS,
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["coordonnees_gps"] == {"latitude": 6.14, "longitude": 1.21}
+
+
+def test_plage_revenus_invalide_rejetee(client):
+    payload = dict(CLIENT_PAYLOAD)
+    payload["piece_identite"] = {"type": "CNI", "numero": "TG-AUTRE-0001"}
+    payload["activite_professionnelle"] = {
+        "revenus_mensuels_min": 500000,
+        "revenus_mensuels_max": 100000,
+    }
+    response = client.post("/api/v1/clients", json=payload, headers=HEADERS)
+    assert response.status_code == 422
 
 
 def test_documents_sous_ressource(client):

@@ -66,10 +66,21 @@ def creer_client(
         telephone=payload.telephone,
         email=payload.email,
         agence=payload.agence,
+        situation_matrimoniale=(
+            payload.situation_matrimoniale.value if payload.situation_matrimoniale else None
+        ),
+        nom_conjoint=payload.nom_conjoint,
+        nom_pere=payload.nom_pere,
+        profession_pere=payload.profession_pere,
+        nom_mere=payload.nom_mere,
+        profession_mere=payload.profession_mere,
+        latitude=payload.coordonnees_gps.latitude if payload.coordonnees_gps else None,
+        longitude=payload.coordonnees_gps.longitude if payload.coordonnees_gps else None,
         secteur_activite=payload.activite_professionnelle.secteur_activite,
         profession=payload.activite_professionnelle.profession,
         employeur=payload.activite_professionnelle.employeur,
-        revenus_mensuels_estimes=payload.activite_professionnelle.revenus_mensuels_estimes,
+        revenus_mensuels_min=payload.activite_professionnelle.revenus_mensuels_min,
+        revenus_mensuels_max=payload.activite_professionnelle.revenus_mensuels_max,
         devise_revenus=payload.activite_professionnelle.devise_revenus,
         source_revenus=payload.activite_professionnelle.source_revenus,
         autres_sources_revenus=payload.activite_professionnelle.autres_sources_revenus,
@@ -167,6 +178,11 @@ def mettre_a_jour_client(
         client.ppe_precisions = ppe["precisions"]
     else:
         donnees.pop("auto_declaration_ppe", None)
+
+    if "coordonnees_gps" in donnees:
+        coordonnees = donnees.pop("coordonnees_gps")
+        client.latitude = coordonnees["latitude"] if coordonnees else None
+        client.longitude = coordonnees["longitude"] if coordonnees else None
 
     donnees.pop("piece_identite", None)
 
@@ -323,11 +339,27 @@ def to_read(client: models.Client) -> schemas.ClientRead:
         telephone=client.telephone,
         email=client.email,
         agence=client.agence,
+        situation_matrimoniale=(
+            schemas.SituationMatrimoniale(client.situation_matrimoniale)
+            if client.situation_matrimoniale
+            else None
+        ),
+        nom_conjoint=client.nom_conjoint,
+        nom_pere=client.nom_pere,
+        profession_pere=client.profession_pere,
+        nom_mere=client.nom_mere,
+        profession_mere=client.profession_mere,
+        coordonnees_gps=(
+            schemas.CoordonneesGPS(latitude=client.latitude, longitude=client.longitude)
+            if client.latitude is not None and client.longitude is not None
+            else None
+        ),
         activite_professionnelle=schemas.ActiviteProfessionnelle(
             secteur_activite=client.secteur_activite,
             profession=client.profession,
             employeur=client.employeur,
-            revenus_mensuels_estimes=client.revenus_mensuels_estimes,
+            revenus_mensuels_min=client.revenus_mensuels_min,
+            revenus_mensuels_max=client.revenus_mensuels_max,
             devise_revenus=client.devise_revenus,
             source_revenus=client.source_revenus,
             autres_sources_revenus=client.autres_sources_revenus,
