@@ -1,0 +1,352 @@
+from datetime import date, datetime
+from enum import Enum
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+# --------------------------------------------------------------------------
+# Enumerations
+# --------------------------------------------------------------------------
+
+
+class TypeClient(str, Enum):
+    physique = "physique"
+    morale = "morale"
+
+
+class StatutClient(str, Enum):
+    actif = "actif"
+    cloture = "cloture"
+
+
+class CanalEntreeRelation(str, Enum):
+    agence = "agence"
+    agent = "agent"
+    en_ligne = "en_ligne"
+
+
+class StatutDocument(str, Enum):
+    valide = "valide"
+    expire = "expire"
+    en_attente_renouvellement = "en_attente_renouvellement"
+
+
+class TypeOperation(str, Enum):
+    depot = "depot"
+    retrait = "retrait"
+    virement = "virement"
+
+
+# --------------------------------------------------------------------------
+# Blocs imbriques reutilisables
+# --------------------------------------------------------------------------
+
+
+class PieceIdentite(BaseModel):
+    type: str
+    numero: str
+
+
+class ActiviteProfessionnelle(BaseModel):
+    secteur_activite: str | None = None
+    profession: str | None = None
+    employeur: str | None = None
+    revenus_mensuels_estimes: float | None = None
+    devise_revenus: str | None = None
+    source_revenus: str | None = None
+    autres_sources_revenus: str | None = None
+    objet_relation: str | None = None
+
+
+class AutoDeclarationPPE(BaseModel):
+    est_ppe_ou_proche: bool = False
+    precisions: str | None = None
+
+
+# --------------------------------------------------------------------------
+# Bénéficiaires effectifs
+# --------------------------------------------------------------------------
+
+
+class BeneficiaireEffectifBase(BaseModel):
+    nom_complet: str
+    date_naissance: date | None = None
+    nationalite: str | None = None
+    adresse: str | None = None
+    pourcentage_detention: float | None = Field(default=None, ge=0, le=100)
+    type_piece_identite: str | None = None
+    numero_piece_identite: str | None = None
+    fonction: str | None = None
+
+
+class BeneficiaireEffectifCreate(BeneficiaireEffectifBase):
+    pass
+
+
+class BeneficiaireEffectifUpdate(BaseModel):
+    nom_complet: str | None = None
+    date_naissance: date | None = None
+    nationalite: str | None = None
+    adresse: str | None = None
+    pourcentage_detention: float | None = Field(default=None, ge=0, le=100)
+    type_piece_identite: str | None = None
+    numero_piece_identite: str | None = None
+    fonction: str | None = None
+
+
+class BeneficiaireEffectifRead(BeneficiaireEffectifBase):
+    model_config = ConfigDict(from_attributes=True)
+
+    external_id: str
+    created_at: datetime
+    updated_at: datetime
+
+
+# --------------------------------------------------------------------------
+# Documents
+# --------------------------------------------------------------------------
+
+
+class DocumentBase(BaseModel):
+    type_document: str
+    numero: str | None = None
+    date_delivrance: date | None = None
+    date_expiration: date | None = None
+    autorite_emettrice: str | None = None
+    statut: StatutDocument = StatutDocument.valide
+    reference_fichier: str | None = None
+
+
+class DocumentCreate(DocumentBase):
+    pass
+
+
+class DocumentUpdate(BaseModel):
+    type_document: str | None = None
+    numero: str | None = None
+    date_delivrance: date | None = None
+    date_expiration: date | None = None
+    autorite_emettrice: str | None = None
+    statut: StatutDocument | None = None
+    reference_fichier: str | None = None
+
+
+class DocumentRead(DocumentBase):
+    model_config = ConfigDict(from_attributes=True)
+
+    external_id: str
+    created_at: datetime
+    updated_at: datetime
+
+
+# --------------------------------------------------------------------------
+# Comptes
+# --------------------------------------------------------------------------
+
+
+class CompteCreate(BaseModel):
+    """Utilise pour l'ouverture d'un compte additionnel.
+
+    Les champs non fournis reprennent les valeurs par defaut configurees
+    via variables d'environnement (mêmes valeurs que pour le compte
+    auto-cree a la creation du client).
+    """
+
+    type_compte: str | None = None
+    devise: str | None = None
+    solde_initial: float | None = None
+
+
+class CompteRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    external_id: str
+    numero_compte: str
+    type_compte: str
+    devise: str
+    solde: float
+    client_external_id: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class ComptesListResponse(BaseModel):
+    total: int
+    limite: int
+    decalage: int
+    resultats: list[CompteRead]
+
+
+# --------------------------------------------------------------------------
+# Transactions
+# --------------------------------------------------------------------------
+
+
+class TransactionCreate(BaseModel):
+    type_operation: TypeOperation
+    montant: float = Field(gt=0)
+    devise: str | None = None
+    canal: str | None = None
+    date_operation: datetime | None = None
+    compte_destination_external_id: str | None = None
+
+
+class TransactionRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    external_id: str
+    compte_external_id: str
+    client_external_id: str
+    compte_destination_external_id: str | None = None
+    type_operation: TypeOperation
+    montant: float
+    devise: str
+    canal: str | None = None
+    date_operation: datetime
+    created_at: datetime
+    updated_at: datetime
+
+
+class TransactionsListResponse(BaseModel):
+    total: int
+    limite: int
+    decalage: int
+    resultats: list[TransactionRead]
+
+
+# --------------------------------------------------------------------------
+# Clients
+# --------------------------------------------------------------------------
+
+
+class ClientBase(BaseModel):
+    type: TypeClient
+    nom: str
+    prenoms: str | None = None
+    date_naissance: date | None = None
+    date_creation_entite: date | None = None
+    nationalite: str
+    piece_identite: PieceIdentite
+    adresse: str
+    telephone: str
+    email: str | None = None
+    agence: str
+
+    activite_professionnelle: ActiviteProfessionnelle = Field(
+        default_factory=ActiviteProfessionnelle
+    )
+    beneficiaires_effectifs: list[BeneficiaireEffectifCreate] = Field(default_factory=list)
+    documents: list[DocumentCreate] = Field(default_factory=list)
+
+    canal_entree_relation: CanalEntreeRelation | None = None
+    date_entree_relation: date | None = None
+    agent_traitant: str | None = None
+
+    auto_declaration_ppe: AutoDeclarationPPE = Field(default_factory=AutoDeclarationPPE)
+
+
+class ClientCreate(ClientBase):
+    statut: StatutClient = StatutClient.actif
+
+
+class ClientUpdate(BaseModel):
+    """Mise a jour partielle : seuls les champs fournis sont modifies.
+
+    Pour les documents et bénéficiaires effectifs, préférer les
+    sous-ressources dédiées (POST/PUT/DELETE) qui permettent des mises à
+    jour indépendantes du reste du dossier ; les inclure ici les
+    remplacerait intégralement.
+    """
+
+    type: TypeClient | None = None
+    statut: StatutClient | None = None
+    nom: str | None = None
+    prenoms: str | None = None
+    date_naissance: date | None = None
+    date_creation_entite: date | None = None
+    nationalite: str | None = None
+    piece_identite: PieceIdentite | None = None
+    adresse: str | None = None
+    telephone: str | None = None
+    email: str | None = None
+    agence: str | None = None
+
+    activite_professionnelle: ActiviteProfessionnelle | None = None
+
+    canal_entree_relation: CanalEntreeRelation | None = None
+    date_entree_relation: date | None = None
+    agent_traitant: str | None = None
+
+    auto_declaration_ppe: AutoDeclarationPPE | None = None
+
+
+class ClientRead(BaseModel):
+    external_id: str
+    type: TypeClient
+    statut: StatutClient
+    nom: str
+    prenoms: str | None = None
+    date_naissance: date | None = None
+    date_creation_entite: date | None = None
+    nationalite: str
+    piece_identite: PieceIdentite
+    adresse: str
+    telephone: str
+    email: str | None = None
+    agence: str
+
+    activite_professionnelle: ActiviteProfessionnelle
+    beneficiaires_effectifs: list[BeneficiaireEffectifRead]
+    documents: list[DocumentRead]
+
+    canal_entree_relation: CanalEntreeRelation | None = None
+    date_entree_relation: date | None = None
+    agent_traitant: str | None = None
+
+    auto_declaration_ppe: AutoDeclarationPPE
+
+    comptes: list[CompteRead]
+
+    created_at: datetime
+    updated_at: datetime
+
+
+class ClientSummary(BaseModel):
+    external_id: str
+    type: TypeClient
+    statut: StatutClient
+    nom: str
+    prenoms: str | None = None
+    nationalite: str
+    agence: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class ClientsListResponse(BaseModel):
+    total: int
+    limite: int
+    decalage: int
+    resultats: list[ClientSummary]
+
+
+# --------------------------------------------------------------------------
+# Journal des acces
+# --------------------------------------------------------------------------
+
+
+class JournalAccesEntree(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    horodatage: datetime
+    methode: str
+    chemin: str
+    statut_code: int | None = None
+    consommateur: str | None = None
+
+
+class JournalAccesListResponse(BaseModel):
+    total: int
+    limite: int
+    decalage: int
+    resultats: list[JournalAccesEntree]
