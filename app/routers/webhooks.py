@@ -9,6 +9,7 @@ from .. import models, schemas
 from .. import webhooks as service
 from ..database import get_db
 from ..security import get_current_consumer
+from ..crud.connexions import connexion_de_l_abonnement
 from ..utils import generer_external_id, paginer
 
 router = APIRouter(
@@ -85,6 +86,12 @@ def modifier_abonnement(
     if donnees.get("evenements") is not None:
         abonnement.evenements = json.dumps([schemas.EvenementWebhook(e).value for e in donnees["evenements"]])
     if donnees.get("actif") is not None:
+        connexion = connexion_de_l_abonnement(db, abonnement)
+        if donnees["actif"] and connexion is not None and connexion.statut == schemas.StatutConnexion.revoquee.value:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Cet abonnement appartient à la connexion révoquée {connexion.external_id}.",
+            )
         abonnement.actif = donnees["actif"]
     db.commit()
     db.refresh(abonnement)
@@ -93,7 +100,14 @@ def modifier_abonnement(
 
 @router.delete("/{external_id}", status_code=status.HTTP_204_NO_CONTENT)
 def supprimer_abonnement(external_id: str, db: Session = Depends(get_db)) -> None:
-    db.delete(_abonnement_ou_404(db, external_id))
+    abonnement = _abonnement_ou_404(db, external_id)
+    connexion = connexion_de_l_abonnement(db, abonnement)
+    if connexion is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Cet abonnement appartient à la connexion {connexion.external_id} : révoquez la connexion.",
+        )
+    db.delete(abonnement)
     db.commit()
 
 

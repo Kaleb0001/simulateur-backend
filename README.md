@@ -57,10 +57,14 @@ Toutes les routes `/api/v1/...` exigent :
 Authorization: Bearer <SIMULATEUR_API_TOKEN>
 ```
 
-Le jeton est lu depuis la variable d'environnement `SIMULATEUR_API_TOKEN`
-(voir `app/config.py`). La structure (`Settings.api_keys`, un dict
-jeton → nom de consommateur) permet d'ajouter facilement plusieurs
-clés/consommateurs plus tard sans changer le code des routes.
+Deux sortes de jetons sont acceptées :
+
+- **`SIMULATEUR_API_TOKEN`**, le jeton d'administration (voir
+  `app/config.py`). Il a tous les droits ; c'est celui du frontend du
+  simulateur.
+- **le jeton d'une connexion** (voir « Connexion d'un système tiers »), en
+  lecture seule : il ne passe que les requêtes `GET` (`403` sinon) et il est
+  refusé (`401`) une fois la connexion révoquée.
 
 ## Configuration (variables d'environnement)
 
@@ -72,6 +76,7 @@ clés/consommateurs plus tard sans changer le code des routes.
 | `SOLDE_INITIAL_PAR_DEFAUT` | Solde initial des comptes | `0` |
 | `PREFIXE_NUMERO_COMPTE` | Préfixe du numéro de compte auto-généré | `CPT` |
 | `DATABASE_URL` | URL SQLAlchemy | `sqlite:///./simulateur_imf.db` |
+| `URL_PUBLIQUE_API` | Adresse de l'API renvoyée à un système tiers connecté | `http://127.0.0.1:8011/api/v1` |
 | `WEBHOOK_TIMEOUT_SECONDES` | Délai maximal d'un envoi de webhook | `5` |
 | `WEBHOOK_TENTATIVES_MAX` | Tentatives avant d'abandonner un envoi | `3` |
 | `WEBHOOK_DELAI_ENTRE_TENTATIVES_SECONDES` | Délai de base entre deux tentatives | `2` |
@@ -306,6 +311,62 @@ secret ; `X-Simulateur-Evenement` et `X-Simulateur-Livraison` accompagnent
 l'envoi. L'envoi part en arrière-plan après la réponse ; sans réponse 2xx, il
 est retenté jusqu'à `WEBHOOK_TENTATIVES_MAX` fois (délai
 `WEBHOOK_DELAI_ENTRE_TENTATIVES_SECONDES`, croissant), puis marqué `echouee`.
+
+## Connexion d'un système tiers
+
+Un système tiers (par exemple IMF Shield, via son service d'intégration) a
+besoin de deux accès : **recevoir les événements** et **lire les données** à
+la demande. Une connexion crée les deux d'un seul geste :
+
+- un abonnement webhook vers l'adresse de réception, avec son secret de
+  signature ;
+- un jeton API dédié, en **lecture seule**.
+
+Le jeton et le secret ne sont renvoyés **qu'une fois**, à la création. Ils
+restent valables tant que la connexion n'est pas révoquée. S'ils sont perdus,
+on révoque la connexion et on en crée une nouvelle.
+
+| Méthode | Route | Rôle |
+|---|---|---|
+| `POST` | `/api/v1/connexions` | crée l'abonnement et le jeton ; renvoie les accès |
+| `GET` | `/api/v1/connexions`, `/api/v1/connexions/{id}` | liste et détail, sans aucun secret |
+| `POST` | `/api/v1/connexions/{id}/revoquer` | désactive le jeton et l'abonnement |
+
+Ces routes sont réservées au jeton d'administration (`403` avec le jeton d'une
+connexion).
+
+Corps de la création :
+
+```json
+{ "nom": "IMF Shield", "url_reception": "http://localhost:5678/webhook/sfd/v1/events", "evenements": [] }
+```
+
+Réponse (`201`) :
+
+```json
+{
+  "connexion_id": "CNX-EXT-0001",
+  "api": { "url_base": "http://127.0.0.1:8011/api/v1", "jeton": "<jeton>", "portee": "lecture" },
+  "webhook": { "abonnement_id": "WH-EXT-0003", "url_reception": "http://localhost:5678/webhook/sfd/v1/events", "secret": "<secret>", "evenements": [] }
+}
+```
+
+Ce que permet le jeton : toutes les routes `GET` (clients, comptes,
+transactions, référentiels, journal des accès, abonnements et livraisons de
+webhooks). Toute requête `POST`, `PUT` ou `DELETE` est refusée : le système
+tiers ne modifie rien.
+
+Sécurité :
+
+- le jeton (`secrets.token_urlsafe(32)`) n'est stocké que sous forme
+  d'empreinte SHA-256, avec ses 8 premiers caractères pour l'affichage (table
+  `consommateurs_api`) ;
+- le secret du webhook reste stocké tel quel, comme pour tout abonnement : une
+  signature HMAC ne se calcule pas à partir d'une empreinte ;
+- le journal des accès nomme la connexion (« IMF Shield (CNX-EXT-0001) »), et
+  la connexion indique la dernière utilisation de son jeton ;
+- l'abonnement d'une connexion ne peut être ni supprimé seul, ni réactivé
+  après la révocation (`409`).
 
 ## Tests
 

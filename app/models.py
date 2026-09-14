@@ -315,3 +315,50 @@ class WebhookLivraison(Base):
     livree_le: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     abonnement: Mapped["WebhookAbonnement"] = relationship(back_populates="livraisons")
+
+
+class ConsommateurApi(Base):
+    """Un système tiers autorisé à appeler l'API avec son propre jeton.
+
+    Seule l'empreinte SHA-256 du jeton est conservée : le jeton en clair n'est
+    montré qu'une fois, à la création de la connexion.
+    """
+
+    __tablename__ = "consommateurs_api"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    external_id: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    nom: Mapped[str] = mapped_column(String(160))
+    empreinte_jeton: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    prefixe_jeton: Mapped[str] = mapped_column(String(8))
+    portee: Mapped[str] = mapped_column(String(16), default="lecture", server_default="lecture")
+    actif: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    derniere_utilisation: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class Connexion(Base):
+    """Un système tiers connecté : son abonnement webhook et son jeton API,
+    créés ensemble et révoqués ensemble."""
+
+    __tablename__ = "connexions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    external_id: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    nom: Mapped[str] = mapped_column(String(120))
+    url_reception: Mapped[str] = mapped_column(String(500))
+    # Liste JSON des événements suivis ; vide = tous les événements.
+    evenements: Mapped[str] = mapped_column(Text, default="[]", server_default="[]")
+    abonnement_id: Mapped[int] = mapped_column(ForeignKey("webhook_abonnements.id"))
+    consommateur_id: Mapped[int] = mapped_column(ForeignKey("consommateurs_api.id"))
+    statut: Mapped[str] = mapped_column(String(16), default="active", server_default="active")
+    revoquee_le: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+
+    abonnement: Mapped["WebhookAbonnement"] = relationship()
+    consommateur: Mapped["ConsommateurApi"] = relationship()
+

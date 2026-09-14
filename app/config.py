@@ -23,6 +23,10 @@ class Settings(BaseSettings):
 
     database_url: str = "sqlite:///./simulateur_imf.db"
 
+    # Adresse de l'API telle qu'un système tiers la joint, renvoyée avec son
+    # jeton à la création d'une connexion.
+    url_publique_api: str = "http://127.0.0.1:8011/api/v1"
+
     # Webhooks sortants
     webhook_timeout_secondes: float = 5.0
     webhook_tentatives_max: int = 3

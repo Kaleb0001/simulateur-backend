@@ -8,7 +8,7 @@ from .migrations import (
     peupler_referentiels,
     supprimer_colonnes_retirees,
 )
-from .routers import clients, comptes, journal, referentiels, transactions, webhooks
+from .routers import clients, comptes, connexions, journal, referentiels, transactions, webhooks
 
 Base.metadata.create_all(bind=engine)
 adapter_schema(engine)
@@ -35,6 +35,7 @@ app.include_router(transactions.router)
 app.include_router(journal.router)
 app.include_router(webhooks.router)
 app.include_router(referentiels.router)
+app.include_router(connexions.router)
 
 
 @app.get("/", tags=["Racine"])

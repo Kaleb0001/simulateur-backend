@@ -653,3 +653,79 @@ class WebhookLivraisonsListResponse(BaseModel):
     limite: int
     decalage: int
     resultats: list[WebhookLivraisonRead]
+
+
+# --------------------------------------------------------------------------
+# Connexions de systèmes tiers
+# --------------------------------------------------------------------------
+
+
+class PorteeJeton(str, Enum):
+    lecture = "lecture"
+    ecriture = "ecriture"
+
+
+class StatutConnexion(str, Enum):
+    active = "active"
+    revoquee = "revoquee"
+
+
+class ConnexionCreate(BaseModel):
+    nom: str = Field(min_length=1, max_length=120, description="Ex. « IMF Shield ».")
+    url_reception: HttpUrl = Field(description="Adresse qui reçoit les webhooks.")
+    evenements: list[EvenementWebhook] = Field(
+        default_factory=list,
+        description="Événements suivis. Liste vide : tous les événements.",
+    )
+
+
+class ConsommateurApiRead(BaseModel):
+    external_id: str
+    prefixe_jeton: str
+    portee: PorteeJeton
+    actif: bool
+    derniere_utilisation: datetime | None = None
+
+
+class ConnexionRead(BaseModel):
+    """Une connexion, sans aucun secret."""
+
+    external_id: str
+    nom: str
+    url_reception: str
+    evenements: list[EvenementWebhook]
+    statut: StatutConnexion
+    abonnement_id: str
+    consommateur: ConsommateurApiRead
+    created_at: datetime
+    updated_at: datetime
+    revoquee_le: datetime | None = None
+
+
+class ConnexionsListResponse(BaseModel):
+    total: int
+    limite: int
+    decalage: int
+    resultats: list[ConnexionRead]
+
+
+class AccesApi(BaseModel):
+    url_base: str
+    jeton: str
+    portee: PorteeJeton
+
+
+class AccesWebhook(BaseModel):
+    abonnement_id: str
+    url_reception: str
+    secret: str
+    evenements: list[EvenementWebhook]
+
+
+class ConnexionCreee(BaseModel):
+    """Réponse à la création : le jeton et le secret ne sont renvoyés qu'ici."""
+
+    connexion_id: str
+    api: AccesApi
+    webhook: AccesWebhook
+
