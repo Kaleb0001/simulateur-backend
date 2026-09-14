@@ -31,10 +31,24 @@ def lister_clients(
     type: schemas.TypeClient | None = None,
     agence: str | None = None,
     modifie_depuis: datetime | None = None,
+    recherche: str | None = Query(
+        default=None,
+        description=(
+            "Recherche partielle, insensible à la casse, sur le nom, les "
+            "prénoms ou le numéro d'identifiant légal (pièce d'identité, "
+            "RCCM ou CUCE)."
+        ),
+    ),
     db: Session = Depends(get_db),
 ) -> schemas.ClientsListResponse:
     total, resultats = clients_crud.lister_clients(
-        db, limite, decalage, type=type, agence=agence, modifie_depuis=modifie_depuis
+        db,
+        limite,
+        decalage,
+        type=type,
+        agence=agence,
+        modifie_depuis=modifie_depuis,
+        recherche=recherche,
     )
     return schemas.ClientsListResponse(
         total=total,

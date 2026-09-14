@@ -60,9 +60,19 @@ class CoordonneesGPS(BaseModel):
     longitude: float = Field(ge=-180, le=180)
 
 
+class AutreActivite(BaseModel):
+    """Activité supplémentaire : une personne morale peut en exercer plusieurs
+    (l'activité principale reste portée par `secteur_activite`/`profession`).
+    """
+
+    secteur_activite: str
+    description: str | None = None
+
+
 class ActiviteProfessionnelle(BaseModel):
     secteur_activite: str | None = None
     profession: str | None = None
+    autres_activites: list[AutreActivite] = Field(default_factory=list)
     employeur: str | None = None
     revenus_mensuels_min: float | None = Field(default=None, ge=0)
     revenus_mensuels_max: float | None = Field(default=None, ge=0)
@@ -87,6 +97,38 @@ class ActiviteProfessionnelle(BaseModel):
 class AutoDeclarationPPE(BaseModel):
     est_ppe_ou_proche: bool = False
     precisions: str | None = None
+
+
+def verifier_identifiants_selon_type(
+    type_client: "TypeClient",
+    piece_identite: PieceIdentite | None,
+    numero_rccm: str | None,
+    numero_cuce: str | None,
+) -> None:
+    """Une personne physique s'identifie par sa pièce d'identité ; une personne
+    morale par son numéro RCCM et son numéro CUCE — sa pièce d'identité n'a pas
+    de sens à ce niveau, ce sont ses bénéficiaires effectifs qui portent
+    chacun la leur. Lève ValueError si la combinaison est incohérente.
+    """
+    if type_client == TypeClient.physique:
+        if piece_identite is None:
+            raise ValueError(
+                "piece_identite est obligatoire pour un client de type physique."
+            )
+        if numero_rccm or numero_cuce:
+            raise ValueError(
+                "numero_rccm et numero_cuce ne s'appliquent qu'aux clients de type morale."
+            )
+    else:
+        if not numero_rccm or not numero_cuce:
+            raise ValueError(
+                "numero_rccm et numero_cuce sont obligatoires pour un client de type morale."
+            )
+        if piece_identite is not None:
+            raise ValueError(
+                "piece_identite ne s'applique pas à un client de type morale : la pièce "
+                "d'identité est collectée sur chaque bénéficiaire effectif."
+            )
 
 
 # --------------------------------------------------------------------------
@@ -171,11 +213,12 @@ class DocumentRead(DocumentBase):
 
 
 class CompteCreate(BaseModel):
-    """Utilise pour l'ouverture d'un compte additionnel.
+    """Utilisé pour l'ouverture d'un compte additionnel, ou pour personnaliser
+    le compte auto-créé à la création d'un client (voir
+    `ClientBase.compte_initial`).
 
-    Les champs non fournis reprennent les valeurs par defaut configurees
-    via variables d'environnement (mêmes valeurs que pour le compte
-    auto-cree a la creation du client).
+    Les champs non fournis reprennent les valeurs par défaut configurées
+    via variables d'environnement.
     """
 
     type_compte: str | None = None
@@ -224,6 +267,7 @@ class TransactionRead(BaseModel):
     compte_external_id: str
     client_external_id: str
     compte_destination_external_id: str | None = None
+    client_destination_external_id: str | None = None
     type_operation: TypeOperation
     montant: float
     devise: str
@@ -252,7 +296,9 @@ class ClientBase(BaseModel):
     date_naissance: date | None = None
     date_creation_entite: date | None = None
     nationalite: str
-    piece_identite: PieceIdentite
+    piece_identite: PieceIdentite | None = None
+    numero_rccm: str | None = None
+    numero_cuce: str | None = None
     adresse: str
     telephone: str
     email: str | None = None
@@ -279,6 +325,22 @@ class ClientBase(BaseModel):
 
     auto_declaration_ppe: AutoDeclarationPPE = Field(default_factory=AutoDeclarationPPE)
 
+    compte_initial: CompteCreate | None = Field(
+        default=None,
+        description=(
+            "Permet de choisir le type/la devise/le solde initial du compte "
+            "auto-créé pour ce client ; les champs non fournis reprennent "
+            "les valeurs par défaut configurées via variables d'environnement."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _verifier_identifiants_selon_type(self) -> "ClientBase":
+        verifier_identifiants_selon_type(
+            self.type, self.piece_identite, self.numero_rccm, self.numero_cuce
+        )
+        return self
+
 
 class ClientCreate(ClientBase):
     statut: StatutClient = StatutClient.actif
@@ -301,6 +363,8 @@ class ClientUpdate(BaseModel):
     date_creation_entite: date | None = None
     nationalite: str | None = None
     piece_identite: PieceIdentite | None = None
+    numero_rccm: str | None = None
+    numero_cuce: str | None = None
     adresse: str | None = None
     telephone: str | None = None
     email: str | None = None
@@ -333,7 +397,9 @@ class ClientRead(BaseModel):
     date_naissance: date | None = None
     date_creation_entite: date | None = None
     nationalite: str
-    piece_identite: PieceIdentite
+    piece_identite: PieceIdentite | None = None
+    numero_rccm: str | None = None
+    numero_cuce: str | None = None
     adresse: str
     telephone: str
     email: str | None = None

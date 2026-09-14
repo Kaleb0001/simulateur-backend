@@ -1,8 +1,8 @@
 from datetime import datetime
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
-from sqlalchemy.orm import Session, aliased
+from sqlalchemy import or_, select
+from sqlalchemy.orm import Session
 
 from .. import models, schemas
 from ..utils import generer_external_id, maintenant_utc, paginer
@@ -87,15 +87,30 @@ def lister_transactions(
     date_fin: datetime | None = None,
     modifie_depuis: datetime | None = None,
 ) -> tuple[int, list[models.Transaction]]:
-    compte_source = aliased(models.Compte)
-    stmt = select(models.Transaction).join(compte_source, models.Transaction.compte)
+    """`client_external_id`/`compte_external_id` filtrent sur les transactions
+    où le compte visé est débité OU crédité (compte source ou destination
+    d'un virement) : un virement reçu doit apparaître dans l'historique du
+    client qui l'a reçu, pas seulement dans celui de l'émetteur.
+    """
+    stmt = select(models.Transaction)
 
-    if client_external_id is not None:
-        stmt = stmt.join(models.Client, compte_source.client).where(
-            models.Client.external_id == client_external_id
+    if client_external_id is not None or compte_external_id is not None:
+        comptes_vises = select(models.Compte.id)
+        if client_external_id is not None:
+            comptes_vises = comptes_vises.join(models.Client).where(
+                models.Client.external_id == client_external_id
+            )
+        if compte_external_id is not None:
+            comptes_vises = comptes_vises.where(
+                models.Compte.external_id == compte_external_id
+            )
+        stmt = stmt.where(
+            or_(
+                models.Transaction.compte_id.in_(comptes_vises),
+                models.Transaction.compte_destination_id.in_(comptes_vises),
+            )
         )
-    if compte_external_id is not None:
-        stmt = stmt.where(compte_source.external_id == compte_external_id)
+
     if type_operation is not None:
         stmt = stmt.where(models.Transaction.type_operation == type_operation.value)
     if date_debut is not None:
@@ -117,6 +132,11 @@ def to_read(transaction: models.Transaction) -> schemas.TransactionRead:
         client_external_id=transaction.compte.client.external_id,
         compte_destination_external_id=(
             transaction.compte_destination.external_id
+            if transaction.compte_destination
+            else None
+        ),
+        client_destination_external_id=(
+            transaction.compte_destination.client.external_id
             if transaction.compte_destination
             else None
         ),

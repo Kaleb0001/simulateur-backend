@@ -2,53 +2,94 @@ from datetime import datetime
 from enum import Enum
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from .. import models, schemas
 from ..config import Settings
-from ..utils import generer_external_id, paginer
+from ..utils import generer_external_id, maintenant_utc, paginer
 from . import comptes as comptes_crud
 
 
-def piece_identite_en_conflit(
-    db: Session,
-    type_piece: str,
-    numero_piece: str,
-    exclure_client_id: int | None = None,
-) -> bool:
-    """Un même couple (type, numéro) de pièce d'identité ne peut pas être
-    utilisé par deux clients actifs à la fois (hygiène de données basique,
-    pas une règle de conformité).
-    """
+def _existe_client_actif(db: Session, exclure_client_id: int | None, *conditions) -> bool:
     stmt = select(models.Client).where(
-        models.Client.type_piece_identite == type_piece,
-        models.Client.numero_piece_identite == numero_piece,
-        models.Client.statut == schemas.StatutClient.actif.value,
+        models.Client.statut == schemas.StatutClient.actif.value, *conditions
     )
     if exclure_client_id is not None:
         stmt = stmt.where(models.Client.id != exclure_client_id)
     return db.scalar(stmt) is not None
 
 
-def _verifier_unicite_piece_identite(
-    db: Session, type_piece: str, numero_piece: str, exclure_client_id: int | None = None
+def _verifier_unicite_identifiants(
+    db: Session,
+    type_client: str,
+    type_piece: str | None,
+    numero_piece: str | None,
+    numero_rccm: str | None,
+    numero_cuce: str | None,
+    exclure_client_id: int | None = None,
 ) -> None:
-    if piece_identite_en_conflit(db, type_piece, numero_piece, exclure_client_id):
+    """Deux clients actifs ne peuvent pas partager le même identifiant légal
+    (pièce d'identité pour une personne physique, RCCM ou CUCE pour une
+    personne morale) — hygiène de données basique, pas une règle de conformité.
+    """
+    if type_client == schemas.TypeClient.physique.value:
+        if (
+            type_piece
+            and numero_piece
+            and _existe_client_actif(
+                db,
+                exclure_client_id,
+                models.Client.type_piece_identite == type_piece,
+                models.Client.numero_piece_identite == numero_piece,
+            )
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "Un client actif existe déjà avec ce type et ce numéro de "
+                    "pièce d'identité."
+                ),
+            )
+        return
+
+    if numero_rccm and _existe_client_actif(
+        db, exclure_client_id, models.Client.numero_rccm == numero_rccm
+    ):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=(
-                "Un client actif existe déjà avec ce type et ce numéro de "
-                "pièce d'identité."
-            ),
+            detail="Un client actif existe déjà avec ce numéro RCCM.",
         )
+    if numero_cuce and _existe_client_actif(
+        db, exclure_client_id, models.Client.numero_cuce == numero_cuce
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Un client actif existe déjà avec ce numéro CUCE.",
+        )
+
+
+def _toucher_client(client: models.Client) -> None:
+    """Fait remonter la date de modification du client lorsqu'une de ses
+    sous-ressources change. Sans cela, l'ajout d'un document ou d'un
+    bénéficiaire effectif ne touche que la table enfant : le dossier
+    n'apparaîtrait pas dans un `GET /clients?modifie_depuis=...`, et un
+    consommateur qui synchronise de façon incrémentale manquerait la mise à
+    jour.
+    """
+    client.updated_at = maintenant_utc()
 
 
 def creer_client(
     db: Session, payload: schemas.ClientCreate, settings: Settings
 ) -> models.Client:
-    _verifier_unicite_piece_identite(
-        db, payload.piece_identite.type, payload.piece_identite.numero
+    _verifier_unicite_identifiants(
+        db,
+        type_client=payload.type.value,
+        type_piece=payload.piece_identite.type if payload.piece_identite else None,
+        numero_piece=payload.piece_identite.numero if payload.piece_identite else None,
+        numero_rccm=payload.numero_rccm,
+        numero_cuce=payload.numero_cuce,
     )
 
     client = models.Client(
@@ -60,8 +101,10 @@ def creer_client(
         date_naissance=payload.date_naissance,
         date_creation_entite=payload.date_creation_entite,
         nationalite=payload.nationalite,
-        type_piece_identite=payload.piece_identite.type,
-        numero_piece_identite=payload.piece_identite.numero,
+        type_piece_identite=payload.piece_identite.type if payload.piece_identite else None,
+        numero_piece_identite=payload.piece_identite.numero if payload.piece_identite else None,
+        numero_rccm=payload.numero_rccm,
+        numero_cuce=payload.numero_cuce,
         adresse=payload.adresse,
         telephone=payload.telephone,
         email=payload.email,
@@ -98,10 +141,19 @@ def creer_client(
 
     client.external_id = generer_external_id("CL-EXT", client.id)
 
-    for doc_payload in payload.documents:
-        _construire_document(client, doc_payload)
-    for ben_payload in payload.beneficiaires_effectifs:
-        _construire_beneficiaire(client, ben_payload)
+    # external_id reçoit un espace réservé distinct par élément (et non "" pour
+    # tous) : lorsque plusieurs documents/bénéficiaires sont créés dans le même
+    # flush, SQLAlchemy regroupe leurs INSERT — une valeur "" partagée par au
+    # moins deux lignes violerait la contrainte d'unicité avant même qu'on ait
+    # pu leur attribuer leur véritable external_id.
+    for index, doc_payload in enumerate(payload.documents):
+        document = _construire_document(client, doc_payload)
+        document.external_id = f"_tmp_doc_{index}"
+    for index, ben_payload in enumerate(payload.beneficiaires_effectifs):
+        beneficiaire = _construire_beneficiaire(client, ben_payload)
+        beneficiaire.external_id = f"_tmp_ben_{index}"
+
+    _remplacer_autres_activites(client, payload.activite_professionnelle.autres_activites)
 
     db.flush()  # attribue un id à chaque document/bénéficiaire nouvellement rattaché
 
@@ -110,8 +162,11 @@ def creer_client(
     for beneficiaire in client.beneficiaires_effectifs:
         beneficiaire.external_id = generer_external_id("BEN-EXT", beneficiaire.id)
 
-    # Compte auto-créé (voir §2 du prompt) : un client n'existe jamais sans compte.
-    comptes_crud.creer_compte(db, client, settings)
+    # Compte auto-créé (voir §2 du prompt) : un client n'existe jamais sans
+    # compte. payload.compte_initial permet d'en choisir le type/la devise/le
+    # solde initial ; les champs non fournis reprennent les valeurs par
+    # défaut configurées via variables d'environnement.
+    comptes_crud.creer_compte(db, client, settings, payload.compte_initial)
 
     db.commit()
     db.refresh(client)
@@ -129,6 +184,7 @@ def lister_clients(
     type: schemas.TypeClient | None = None,
     agence: str | None = None,
     modifie_depuis: datetime | None = None,
+    recherche: str | None = None,
 ) -> tuple[int, list[models.Client]]:
     stmt = select(models.Client)
 
@@ -138,6 +194,21 @@ def lister_clients(
         stmt = stmt.where(models.Client.agence == agence)
     if modifie_depuis is not None:
         stmt = stmt.where(models.Client.updated_at >= modifie_depuis)
+    if recherche:
+        # Recherche partielle, insensible à la casse, sur les champs qu'un
+        # agent a sous la main : nom, prénoms et numéro d'identifiant légal
+        # (pièce d'identité pour une personne physique, RCCM/CUCE pour une
+        # personne morale).
+        motif = f"%{recherche}%"
+        stmt = stmt.where(
+            or_(
+                models.Client.nom.ilike(motif),
+                models.Client.prenoms.ilike(motif),
+                models.Client.numero_piece_identite.ilike(motif),
+                models.Client.numero_rccm.ilike(motif),
+                models.Client.numero_cuce.ilike(motif),
+            )
+        )
 
     stmt = stmt.order_by(models.Client.updated_at.asc())
 
@@ -149,26 +220,20 @@ def mettre_a_jour_client(
 ) -> models.Client:
     donnees = payload.model_dump(exclude_unset=True)
 
-    nouveau_type_piece = client.type_piece_identite
-    nouveau_numero_piece = client.numero_piece_identite
-    if "piece_identite" in donnees and donnees["piece_identite"] is not None:
-        nouveau_type_piece = donnees["piece_identite"]["type"]
-        nouveau_numero_piece = donnees["piece_identite"]["numero"]
-
-    if (nouveau_type_piece, nouveau_numero_piece) != (
-        client.type_piece_identite,
-        client.numero_piece_identite,
-    ):
-        _verifier_unicite_piece_identite(
-            db, nouveau_type_piece, nouveau_numero_piece, exclure_client_id=client.id
-        )
-    client.type_piece_identite = nouveau_type_piece
-    client.numero_piece_identite = nouveau_numero_piece
+    if "piece_identite" in donnees:
+        piece = donnees.pop("piece_identite")
+        client.type_piece_identite = piece["type"] if piece else None
+        client.numero_piece_identite = piece["numero"] if piece else None
 
     if "activite_professionnelle" in donnees and donnees["activite_professionnelle"] is not None:
         activite = donnees.pop("activite_professionnelle")
+        autres_activites = activite.pop("autres_activites", None)
         for champ, valeur in activite.items():
             setattr(client, champ, valeur)
+        if autres_activites is not None:
+            _remplacer_autres_activites(
+                client, [schemas.AutreActivite(**a) for a in autres_activites]
+            )
     else:
         donnees.pop("activite_professionnelle", None)
 
@@ -184,16 +249,50 @@ def mettre_a_jour_client(
         client.latitude = coordonnees["latitude"] if coordonnees else None
         client.longitude = coordonnees["longitude"] if coordonnees else None
 
-    donnees.pop("piece_identite", None)
-
     for champ, valeur in donnees.items():
         # Les champs de type Enum (type, statut, canal_entree_relation...)
         # doivent être stockés comme de simples chaînes en base.
         setattr(client, champ, valeur.value if isinstance(valeur, Enum) else valeur)
 
+    _verifier_dossier_coherent(client)
+    _verifier_unicite_identifiants(
+        db,
+        type_client=client.type,
+        type_piece=client.type_piece_identite,
+        numero_piece=client.numero_piece_identite,
+        numero_rccm=client.numero_rccm,
+        numero_cuce=client.numero_cuce,
+        exclure_client_id=client.id,
+    )
+
     db.commit()
     db.refresh(client)
     return client
+
+
+def _verifier_dossier_coherent(client: models.Client) -> None:
+    """Après une mise à jour partielle, le dossier doit rester cohérent :
+    une personne physique garde sa pièce d'identité, une personne morale son
+    RCCM et son CUCE.
+    """
+    piece_identite = (
+        schemas.PieceIdentite(
+            type=client.type_piece_identite, numero=client.numero_piece_identite
+        )
+        if client.type_piece_identite and client.numero_piece_identite
+        else None
+    )
+    try:
+        schemas.verifier_identifiants_selon_type(
+            schemas.TypeClient(client.type),
+            piece_identite,
+            client.numero_rccm,
+            client.numero_cuce,
+        )
+    except ValueError as erreur:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(erreur)
+        ) from erreur
 
 
 # --------------------------------------------------------------------------
@@ -223,6 +322,7 @@ def ajouter_document(
     document = _construire_document(client, payload)
     db.flush()
     document.external_id = generer_external_id("DOC-EXT", document.id)
+    _toucher_client(client)
     db.commit()
     db.refresh(document)
     return document
@@ -243,12 +343,14 @@ def mettre_a_jour_document(
     donnees = payload.model_dump(exclude_unset=True)
     for champ, valeur in donnees.items():
         setattr(document, champ, valeur.value if isinstance(valeur, Enum) else valeur)
+    _toucher_client(document.client)
     db.commit()
     db.refresh(document)
     return document
 
 
 def supprimer_document(db: Session, document: models.Document) -> None:
+    _toucher_client(document.client)
     db.delete(document)
     db.commit()
 
@@ -283,6 +385,7 @@ def ajouter_beneficiaire(
     beneficiaire = _construire_beneficiaire(client, payload)
     db.flush()
     beneficiaire.external_id = generer_external_id("BEN-EXT", beneficiaire.id)
+    _toucher_client(client)
     db.commit()
     db.refresh(beneficiaire)
     return beneficiaire
@@ -307,14 +410,39 @@ def mettre_a_jour_beneficiaire(
     donnees = payload.model_dump(exclude_unset=True)
     for champ, valeur in donnees.items():
         setattr(beneficiaire, champ, valeur)
+    _toucher_client(beneficiaire.client)
     db.commit()
     db.refresh(beneficiaire)
     return beneficiaire
 
 
 def supprimer_beneficiaire(db: Session, beneficiaire: models.BeneficiaireEffectif) -> None:
+    _toucher_client(beneficiaire.client)
     db.delete(beneficiaire)
     db.commit()
+
+
+# --------------------------------------------------------------------------
+# Autres activités
+# --------------------------------------------------------------------------
+
+
+def _remplacer_autres_activites(
+    client: models.Client, activites: list[schemas.AutreActivite]
+) -> None:
+    """Les activités supplémentaires sont de simples libellés sans cycle de
+    vie propre (contrairement aux documents ou aux bénéficiaires effectifs) :
+    elles sont remplacées en bloc, ce qui correspond au fonctionnement d'un
+    formulaire à champs répétables.
+    """
+    client.autres_activites.clear()
+    for activite in activites:
+        client.autres_activites.append(
+            models.AutreActivite(
+                secteur_activite=activite.secteur_activite,
+                description=activite.description,
+            )
+        )
 
 
 # --------------------------------------------------------------------------
@@ -332,9 +460,15 @@ def to_read(client: models.Client) -> schemas.ClientRead:
         date_naissance=client.date_naissance,
         date_creation_entite=client.date_creation_entite,
         nationalite=client.nationalite,
-        piece_identite=schemas.PieceIdentite(
-            type=client.type_piece_identite, numero=client.numero_piece_identite
+        piece_identite=(
+            schemas.PieceIdentite(
+                type=client.type_piece_identite, numero=client.numero_piece_identite
+            )
+            if client.type_piece_identite and client.numero_piece_identite
+            else None
         ),
+        numero_rccm=client.numero_rccm,
+        numero_cuce=client.numero_cuce,
         adresse=client.adresse,
         telephone=client.telephone,
         email=client.email,
@@ -357,6 +491,13 @@ def to_read(client: models.Client) -> schemas.ClientRead:
         activite_professionnelle=schemas.ActiviteProfessionnelle(
             secteur_activite=client.secteur_activite,
             profession=client.profession,
+            autres_activites=[
+                schemas.AutreActivite(
+                    secteur_activite=activite.secteur_activite,
+                    description=activite.description,
+                )
+                for activite in client.autres_activites
+            ],
             employeur=client.employeur,
             revenus_mensuels_min=client.revenus_mensuels_min,
             revenus_mensuels_max=client.revenus_mensuels_max,

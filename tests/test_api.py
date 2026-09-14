@@ -1,6 +1,7 @@
 from tests.conftest import HEADERS
 
 CLIENT_EXTERNAL_ID: str | None = None
+CLIENT_MORALE_EXTERNAL_ID: str | None = None
 COMPTE_EXTERNAL_ID: str | None = None
 COMPTE_EPARGNE_EXTERNAL_ID: str | None = None
 
@@ -49,6 +50,39 @@ CLIENT_PAYLOAD = {
 }
 
 
+MORALE_PAYLOAD = {
+    "type": "morale",
+    "nom": "Sogex Togo SARL",
+    "date_creation_entite": "2015-06-01",
+    "nationalite": "Togolaise",
+    "numero_rccm": "TG-LOM-2015-B-1234",
+    "numero_cuce": "CUCE-0099887",
+    "adresse": "Zone portuaire, Lomé",
+    "telephone": "+22822334455",
+    "agence": "Lomé-Port",
+    "activite_professionnelle": {
+        "secteur_activite": "Import-export",
+        "autres_activites": [
+            {"secteur_activite": "Transport", "description": "Location de camions"},
+            {"secteur_activite": "BTP"},
+        ],
+        "revenus_mensuels_min": 5000000,
+        "revenus_mensuels_max": 12000000,
+        "devise_revenus": "XOF",
+        "objet_relation": "Financement d'activité",
+    },
+    "beneficiaires_effectifs": [
+        {
+            "nom_complet": "Yao Amegan",
+            "pourcentage_detention": 70,
+            "type_piece_identite": "CNI",
+            "numero_piece_identite": "TG-777888",
+            "fonction": "Gérant",
+        }
+    ],
+}
+
+
 def test_authentification_requise(client):
     response = client.get("/api/v1/clients")
     assert response.status_code == 401
@@ -89,6 +123,46 @@ def test_creation_client_avec_compte_auto_cree(client):
     global CLIENT_EXTERNAL_ID, COMPTE_EXTERNAL_ID
     CLIENT_EXTERNAL_ID = data["external_id"]
     COMPTE_EXTERNAL_ID = compte["external_id"]
+
+
+def test_creation_client_avec_compte_initial_personnalise(client):
+    payload = dict(CLIENT_PAYLOAD)
+    payload["piece_identite"] = {"type": "CNI", "numero": "TG-CPT-INIT-0001"}
+    payload["compte_initial"] = {"type_compte": "Épargne", "devise": "USD", "solde_initial": 5000}
+
+    response = client.post("/api/v1/clients", json=payload, headers=HEADERS)
+    assert response.status_code == 201, response.text
+    compte = response.json()["comptes"][0]
+    assert compte["type_compte"] == "Épargne"
+    assert compte["devise"] == "USD"
+    assert compte["solde"] == 5000
+
+
+def test_creation_client_avec_plusieurs_documents_et_beneficiaires(client):
+    """Régression : un même flush ne doit pas produire deux external_id
+    identiques (vide) pour deux documents/bénéficiaires créés en une seule
+    requête POST /api/v1/clients.
+    """
+    payload = dict(CLIENT_PAYLOAD)
+    payload["piece_identite"] = {"type": "CNI", "numero": "TG-MULTI-0001"}
+    payload["documents"] = [
+        {"type_document": "CNI", "numero": "A1"},
+        {"type_document": "Justificatif de domicile", "numero": "A2"},
+        {"type_document": "Carte consulaire", "numero": "A3"},
+    ]
+    payload["beneficiaires_effectifs"] = [
+        {"nom_complet": "Ben One", "pourcentage_detention": 50},
+        {"nom_complet": "Ben Two", "pourcentage_detention": 50},
+    ]
+
+    response = client.post("/api/v1/clients", json=payload, headers=HEADERS)
+    assert response.status_code == 201, response.text
+    data = response.json()
+
+    doc_ids = [d["external_id"] for d in data["documents"]]
+    ben_ids = [b["external_id"] for b in data["beneficiaires_effectifs"]]
+    assert len(doc_ids) == 3 and len(set(doc_ids)) == 3
+    assert len(ben_ids) == 2 and len(set(ben_ids)) == 2
 
 
 def test_unicite_piece_identite(client):
@@ -279,6 +353,46 @@ def test_lister_transactions_par_compte(client):
     assert data["total"] == 3  # depot, retrait, virement (source)
 
 
+def test_virement_recu_visible_dans_historique_destinataire(client):
+    """Régression : un virement reçu doit apparaître dans l'historique du
+    compte/client destinataire, pas seulement dans celui de l'émetteur.
+    """
+    payload = dict(CLIENT_PAYLOAD)
+    payload["piece_identite"] = {"type": "CNI", "numero": "TG-DEST-0001"}
+    response = client.post("/api/v1/clients", json=payload, headers=HEADERS)
+    assert response.status_code == 201, response.text
+    destinataire = response.json()
+    destinataire_compte = destinataire["comptes"][0]["external_id"]
+    destinataire_client = destinataire["external_id"]
+
+    response = client.post(
+        f"/api/v1/comptes/{COMPTE_EXTERNAL_ID}/transactions",
+        json={
+            "type_operation": "virement",
+            "montant": 500,
+            "compte_destination_external_id": destinataire_compte,
+        },
+        headers=HEADERS,
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["client_destination_external_id"] == destinataire_client
+
+    response = client.get(
+        "/api/v1/transactions",
+        params={"compte_external_id": destinataire_compte},
+        headers=HEADERS,
+    )
+    assert response.status_code == 200
+    assert response.json()["total"] == 1
+
+    response = client.get(
+        "/api/v1/transactions",
+        params={"client_external_id": destinataire_client},
+        headers=HEADERS,
+    )
+    assert response.json()["total"] == 1
+
+
 def test_modifie_depuis_incremental(client):
     reponse_initiale = client.get("/api/v1/clients", headers=HEADERS).json()
     curseur = max(c["updated_at"] for c in reponse_initiale["resultats"])
@@ -298,3 +412,144 @@ def test_journal_acces_enregistre_les_requetes(client):
     data = response.json()
     assert data["total"] >= 1
     assert any(entree["chemin"] == "/api/v1/clients" for entree in data["resultats"])
+
+
+# --------------------------------------------------------------------------
+# Personne morale : RCCM / CUCE, activités multiples
+# --------------------------------------------------------------------------
+
+
+def test_creation_client_morale_avec_rccm_et_cuce(client):
+    response = client.post("/api/v1/clients", json=MORALE_PAYLOAD, headers=HEADERS)
+    assert response.status_code == 201, response.text
+    data = response.json()
+
+    assert data["type"] == "morale"
+    assert data["numero_rccm"] == "TG-LOM-2015-B-1234"
+    assert data["numero_cuce"] == "CUCE-0099887"
+    # La pièce d'identité est portée par les bénéficiaires effectifs, pas par
+    # la personne morale elle-même.
+    assert data["piece_identite"] is None
+    assert data["beneficiaires_effectifs"][0]["numero_piece_identite"] == "TG-777888"
+
+    autres = data["activite_professionnelle"]["autres_activites"]
+    assert [a["secteur_activite"] for a in autres] == ["Transport", "BTP"]
+    assert autres[0]["description"] == "Location de camions"
+
+    global CLIENT_MORALE_EXTERNAL_ID
+    CLIENT_MORALE_EXTERNAL_ID = data["external_id"]
+
+
+def test_client_morale_sans_rccm_ni_cuce_refuse(client):
+    payload = dict(MORALE_PAYLOAD)
+    payload.pop("numero_rccm")
+    payload.pop("numero_cuce")
+    response = client.post("/api/v1/clients", json=payload, headers=HEADERS)
+    assert response.status_code == 422
+
+
+def test_client_morale_avec_piece_identite_refuse(client):
+    payload = dict(MORALE_PAYLOAD)
+    payload["numero_rccm"] = "TG-LOM-2015-B-9999"
+    payload["numero_cuce"] = "CUCE-0000001"
+    payload["piece_identite"] = {"type": "CNI", "numero": "TG-123"}
+    response = client.post("/api/v1/clients", json=payload, headers=HEADERS)
+    assert response.status_code == 422
+
+
+def test_client_physique_avec_rccm_refuse(client):
+    payload = dict(CLIENT_PAYLOAD)
+    payload["piece_identite"] = {"type": "CNI", "numero": "TG-PHYS-RCCM"}
+    payload["numero_rccm"] = "TG-LOM-2020-B-0001"
+    response = client.post("/api/v1/clients", json=payload, headers=HEADERS)
+    assert response.status_code == 422
+
+
+def test_unicite_rccm(client):
+    payload = dict(MORALE_PAYLOAD)
+    payload["numero_cuce"] = "CUCE-AUTRE-001"  # RCCM identique, CUCE différent
+    response = client.post("/api/v1/clients", json=payload, headers=HEADERS)
+    assert response.status_code == 409
+
+
+def test_remplacement_autres_activites(client):
+    response = client.put(
+        f"/api/v1/clients/{CLIENT_MORALE_EXTERNAL_ID}",
+        json={
+            "activite_professionnelle": {
+                "autres_activites": [{"secteur_activite": "Agriculture"}]
+            }
+        },
+        headers=HEADERS,
+    )
+    assert response.status_code == 200, response.text
+    activite = response.json()["activite_professionnelle"]
+    assert [a["secteur_activite"] for a in activite["autres_activites"]] == ["Agriculture"]
+    # Le reste du bloc activité professionnelle n'est pas écrasé.
+    assert activite["secteur_activite"] == "Import-export"
+
+
+# --------------------------------------------------------------------------
+# Recherche
+# --------------------------------------------------------------------------
+
+
+def test_recherche_par_nom_prenoms_et_numero_piece(client):
+    par_nom = client.get(
+        "/api/v1/clients", params={"recherche": "kodjo"}, headers=HEADERS
+    ).json()
+    assert par_nom["total"] >= 1
+    assert all("Kodjo" in c["nom"] for c in par_nom["resultats"])
+
+    par_prenoms = client.get(
+        "/api/v1/clients", params={"recherche": "Mensah"}, headers=HEADERS
+    ).json()
+    assert par_prenoms["total"] >= 1
+
+    par_piece = client.get(
+        "/api/v1/clients", params={"recherche": "TG-0192837"}, headers=HEADERS
+    ).json()
+    assert par_piece["total"] == 1
+    assert par_piece["resultats"][0]["external_id"] == CLIENT_EXTERNAL_ID
+
+    par_rccm = client.get(
+        "/api/v1/clients", params={"recherche": "2015-B-1234"}, headers=HEADERS
+    ).json()
+    assert par_rccm["total"] == 1
+    assert par_rccm["resultats"][0]["external_id"] == CLIENT_MORALE_EXTERNAL_ID
+
+    aucun = client.get(
+        "/api/v1/clients", params={"recherche": "zzz-introuvable"}, headers=HEADERS
+    ).json()
+    assert aucun["total"] == 0
+
+
+# --------------------------------------------------------------------------
+# Synchronisation incrémentale
+# --------------------------------------------------------------------------
+
+
+def test_ajout_document_fait_remonter_updated_at_du_client(client):
+    """Un consommateur qui synchronise sur `modifie_depuis` doit voir le
+    dossier ressortir quand une de ses sous-ressources change.
+    """
+    avant = client.get(
+        f"/api/v1/clients/{CLIENT_MORALE_EXTERNAL_ID}", headers=HEADERS
+    ).json()["updated_at"]
+
+    response = client.post(
+        f"/api/v1/clients/{CLIENT_MORALE_EXTERNAL_ID}/documents",
+        json={"type_document": "Registre de commerce", "numero": "RC-2015"},
+        headers=HEADERS,
+    )
+    assert response.status_code == 201
+
+    apres = client.get(
+        f"/api/v1/clients/{CLIENT_MORALE_EXTERNAL_ID}", headers=HEADERS
+    ).json()["updated_at"]
+    assert apres > avant
+
+    vus = client.get(
+        "/api/v1/clients", params={"modifie_depuis": apres}, headers=HEADERS
+    ).json()
+    assert any(c["external_id"] == CLIENT_MORALE_EXTERNAL_ID for c in vus["resultats"])

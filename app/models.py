@@ -21,8 +21,12 @@ class Client(Base):
     date_naissance: Mapped[date | None] = mapped_column(Date, nullable=True)
     date_creation_entite: Mapped[date | None] = mapped_column(Date, nullable=True)
     nationalite: Mapped[str] = mapped_column(String(120))
-    type_piece_identite: Mapped[str] = mapped_column(String(64))
-    numero_piece_identite: Mapped[str] = mapped_column(String(64))
+    # Personne physique : piece d'identite. Personne morale : RCCM + CUCE
+    # (la piece d'identite est alors collectee sur chaque beneficiaire effectif).
+    type_piece_identite: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    numero_piece_identite: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    numero_rccm: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    numero_cuce: Mapped[str | None] = mapped_column(String(64), nullable=True)
     adresse: Mapped[str] = mapped_column(String(500))
     telephone: Mapped[str] = mapped_column(String(32))
     email: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -74,6 +78,26 @@ class Client(Base):
     beneficiaires_effectifs: Mapped[list["BeneficiaireEffectif"]] = relationship(
         back_populates="client", cascade="all, delete-orphan", order_by="BeneficiaireEffectif.id"
     )
+    autres_activites: Mapped[list["AutreActivite"]] = relationship(
+        back_populates="client", cascade="all, delete-orphan", order_by="AutreActivite.id"
+    )
+
+
+class AutreActivite(Base):
+    """Activites supplementaires d'un client (une personne morale peut en
+    exercer plusieurs). L'activite principale reste portee par les colonnes
+    secteur_activite / profession de Client.
+    """
+
+    __tablename__ = "autres_activites"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    client_id: Mapped[int] = mapped_column(ForeignKey("clients.id"), index=True)
+
+    secteur_activite: Mapped[str] = mapped_column(String(120))
+    description: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+    client: Mapped["Client"] = relationship(back_populates="autres_activites")
 
 
 class BeneficiaireEffectif(Base):

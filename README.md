@@ -27,6 +27,28 @@ Un fichier `.env` est déjà présent avec un jeton de démo
 (`demo-hackathon-vigie`) — à changer avant tout usage réel. `.env.example`
 liste toutes les variables disponibles.
 
+> **Schéma de base de données.** Le schéma est créé au démarrage
+> (`create_all`) et une base SQLite plus ancienne est **mise à niveau
+> automatiquement**, sans perte de données : les colonnes manquantes sont
+> ajoutées, et la table est reconstruite lorsque SQLite ne sait pas faire
+> autrement (contrainte `NOT NULL` à lever, valeur par défaut à poser).
+> Rien à supprimer ni à recréer à la main après un `git pull`. Voir
+> `app/migrations.py` — ce n'est pas un remplaçant d'Alembic, juste le
+> nécessaire pour qu'une base de démonstration survive à l'évolution du
+> modèle pendant le hackathon.
+
+### Changements de contrat récents (à répercuter côté frontend)
+
+- `piece_identite` peut désormais être `null` dans les réponses : il est
+  absent pour les personnes morales, qui portent `numero_rccm` et
+  `numero_cuce` (voir « Identification selon le type de client »).
+- `activite_professionnelle.revenus_mensuels_estimes` est remplacé par
+  `revenus_mensuels_min` / `revenus_mensuels_max`.
+- Nouveaux champs : `autres_activites`, `situation_matrimoniale`,
+  `nom_conjoint`, `nom_pere`, `profession_pere`, `nom_mere`,
+  `profession_mere`, `coordonnees_gps`, `compte_initial` (en création), et
+  `client_destination_external_id` sur les transactions.
+
 ## Authentification
 
 Toutes les routes `/api/v1/...` exigent :
@@ -54,7 +76,7 @@ clés/consommateurs plus tard sans changer le code des routes.
 ## Endpoints
 
 ### Clients
-- `GET /api/v1/clients` — liste paginée (`limite`, `decalage`), filtrable (`type`, `agence`, `modifie_depuis`)
+- `GET /api/v1/clients` — liste paginée (`limite`, `decalage`), filtrable (`type`, `agence`, `modifie_depuis`) et recherchable (`recherche`)
 - `GET /api/v1/clients/{external_id}` — dossier complet (identité, activité professionnelle, bénéficiaires effectifs, documents, comptes)
 - `POST /api/v1/clients` — création (crée aussi automatiquement le premier compte du client)
 - `PUT /api/v1/clients/{external_id}` — modification **partielle** (seuls les champs fournis sont modifiés)
@@ -80,6 +102,53 @@ Toutes les listes renvoient l'enveloppe `{ total, limite, decalage, resultats }`
 et sont triées par `updated_at` croissant, pour permettre à un consommateur
 de mémoriser un simple curseur (`modifie_depuis`) plutôt que de tout
 re-scanner à chaque appel.
+
+## Identification selon le type de client
+
+Une **personne physique** s'identifie par sa pièce d'identité
+(`piece_identite`, obligatoire). Une **personne morale** s'identifie par son
+`numero_rccm` et son `numero_cuce` (tous deux obligatoires) : la pièce
+d'identité n'a pas de sens à ce niveau, ce sont ses **bénéficiaires
+effectifs** qui portent chacun la leur (`type_piece_identite` /
+`numero_piece_identite` sur chaque bénéficiaire).
+
+Les combinaisons incohérentes sont refusées en 422 : une personne physique
+sans pièce d'identité ou portant un RCCM/CUCE, une personne morale sans
+RCCM/CUCE ou portant une pièce d'identité. Le contrôle s'applique aussi
+après une mise à jour partielle.
+
+L'unicité entre clients **actifs** porte sur la pièce d'identité (type +
+numéro) pour une personne physique, et sur le RCCM puis le CUCE (contrôlés
+séparément) pour une personne morale — conflit renvoyé en 409.
+
+## Activités multiples
+
+Une personne morale peut exercer plusieurs activités.
+`activite_professionnelle.autres_activites` est une liste de
+`{ secteur_activite, description }` qui complète l'activité principale
+(`secteur_activite` / `profession`). Elle est **remplacée en bloc** lors
+d'un `PUT /clients/{external_id}` : ce sont de simples libellés sans cycle
+de vie propre, contrairement aux documents et bénéficiaires effectifs qui
+ont, eux, leurs sous-ressources dédiées.
+
+À noter : `adresse` reste un champ unique côté backend. La distinction
+« adresse » / « adresse sociale » selon le type de client est un simple
+libellé à gérer côté frontend.
+
+## Recherche de clients
+
+`GET /api/v1/clients?recherche=...` effectue une recherche partielle,
+insensible à la casse, sur le nom, les prénoms et le numéro d'identifiant
+légal (pièce d'identité, RCCM ou CUCE). Elle se combine avec les autres
+filtres (`type`, `agence`, `modifie_depuis`) et avec la pagination.
+
+## Compte initial personnalisable à la création d'un client
+
+`POST /api/v1/clients` accepte un champ optionnel `compte_initial`
+(`{ type_compte, devise, solde_initial }`) pour choisir le type/la devise/le
+solde du compte auto-créé ; les champs omis reprennent les valeurs par
+défaut configurées via variables d'environnement. Le client garde toujours
+un compte dès sa création, seul son paramétrage devient choisissable.
 
 ## Champs d'identité complémentaires (ajoutés après la v2 du prompt)
 
@@ -132,6 +201,35 @@ développement sans blocage, les choix suivants ont été faits :
   il est traité comme un virement sortant vers un tiers externe (débit
   seul).
 
+## Bugs corrigés suite au retour du développeur frontend
+
+- **`POST /api/v1/clients` avec plusieurs documents/bénéficiaires effectifs**
+  (500) : chaque élément recevait `external_id=""` avant enregistrement ;
+  dès le deuxième élément du même type dans la même requête, SQLAlchemy
+  regroupait leurs `INSERT` dans le même flush et la contrainte d'unicité
+  sur `external_id` était violée. Corrigé en donnant à chaque élément un
+  identifiant temporaire distinct avant le flush, remplacé par son
+  identifiant définitif juste après.
+- **Modification d'une sous-ressource invisible en synchronisation
+  incrémentale** : ajouter, modifier ou supprimer un document ou un
+  bénéficiaire effectif ne touchait que la table enfant, sans faire remonter
+  le `updated_at` du client. Un consommateur qui synchronise via
+  `GET /clients?modifie_depuis=...` manquait donc les évolutions du dossier
+  KYC (renouvellement de pièce, changement d'actionnariat). Corrigé : toute
+  modification d'une sous-ressource met à jour la date de modification du
+  client. Les comptes ne sont volontairement pas concernés : ils disposent
+  de leur propre endpoint de synchronisation.
+- **Virements reçus absents de l'historique du destinataire** :
+  `GET /api/v1/transactions` (et son usage via `client_external_id` /
+  `compte_external_id`) ne filtrait que sur le compte source. Un virement
+  reçu n'apparaissait donc jamais dans l'historique du compte/client
+  crédité, alors même que son solde avait bien été mis à jour — un problème
+  sérieux pour un endpoint dont le rôle est la surveillance des
+  transactions. Corrigé : le filtre matche désormais un compte qu'il soit
+  source **ou** destination. La réponse expose aussi un nouveau champ
+  `client_destination_external_id` pour identifier directement le client
+  crédité sans appel supplémentaire.
+
 ## Tests
 
 ```bash
@@ -155,9 +253,10 @@ app/
   models.py         # modèles SQLAlchemy (Client, Compte, Transaction, ...)
   schemas.py        # schémas Pydantic (entrée/sortie API)
   security.py       # authentification par clé API
-  middleware.py      # journal des accès
+  middleware.py     # journal des accès
+  migrations.py     # mise à niveau d'une base SQLite plus ancienne
   utils.py          # génération d'identifiants, pagination
   crud/             # logique métier par ressource
   routers/          # endpoints FastAPI par ressource
-tests/              # tests d'API (pytest + TestClient)
+tests/              # tests d'API et de migration (pytest + TestClient)
 ```

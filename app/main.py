@@ -2,9 +2,11 @@ from fastapi import FastAPI
 
 from .database import Base, engine
 from .middleware import JournalAccesMiddleware
+from .migrations import adapter_schema
 from .routers import clients, comptes, journal, transactions
 
 Base.metadata.create_all(bind=engine)
+adapter_schema(engine)
 
 app = FastAPI(
     title="Simulateur de système de gestion interne d'IMF",
