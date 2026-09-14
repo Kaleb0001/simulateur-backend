@@ -315,30 +315,53 @@ est retenté jusqu'à `WEBHOOK_TENTATIVES_MAX` fois (délai
 ## Connexion d'un système tiers
 
 Un système tiers (par exemple IMF Shield, via son service d'intégration) a
-besoin de deux accès : **recevoir les événements** et **lire les données** à
-la demande. Une connexion crée les deux d'un seul geste :
+besoin de **recevoir les événements**, de **lire des données** à la demande, ou
+des deux. Une connexion regroupe ces accès :
 
-- un abonnement webhook vers l'adresse de réception, avec son secret de
-  signature ;
-- un jeton API dédié, en **lecture seule**.
+- un abonnement webhook vers `url_reception`, avec son secret de signature
+  (absent si `url_reception` n'est pas fourni) ;
+- un jeton API dédié, en **lecture seule**, limité aux données cochées dans
+  `acces` (absent si la liste est vide).
 
-Le jeton et le secret ne sont renvoyés **qu'une fois**, à la création. Ils
-restent valables tant que la connexion n'est pas révoquée. S'ils sont perdus,
-on révoque la connexion et on en crée une nouvelle.
+Il en faut au moins un des deux (`422` sinon). Le jeton et le secret ne sont
+renvoyés **qu'une fois**, à leur création. Ils restent valables tant que la
+connexion n'est pas révoquée ; s'ils sont perdus, on révoque la connexion et
+on en crée une nouvelle.
 
 | Méthode | Route | Rôle |
 |---|---|---|
-| `POST` | `/api/v1/connexions` | crée l'abonnement et le jeton ; renvoie les accès |
+| `POST` | `/api/v1/connexions` | crée la connexion ; renvoie ses accès |
 | `GET` | `/api/v1/connexions`, `/api/v1/connexions/{id}` | liste et détail, sans aucun secret |
-| `POST` | `/api/v1/connexions/{id}/revoquer` | désactive le jeton et l'abonnement |
+| `PUT` | `/api/v1/connexions/{id}` | change le nom, l'adresse, les événements ou les accès |
+| `POST` | `/api/v1/connexions/{id}/revoquer` | désactive le jeton et l'abonnement, définitivement |
 
 Ces routes sont réservées au jeton d'administration (`403` avec le jeton d'une
-connexion).
+connexion). Le test et les livraisons d'un webhook passent par
+`/api/v1/webhooks/{abonnement_id}`.
 
-Corps de la création :
+### Accès (`acces`)
+
+| Code | Routes lisibles |
+|---|---|
+| `clients` | `/api/v1/clients…` (documents et bénéficiaires compris) |
+| `comptes` | `/api/v1/comptes…` |
+| `transactions` | `/api/v1/transactions…` |
+| `referentiels` | `/api/v1/referentiels` |
+| `journal` | `/api/v1/journal-acces` |
+| `webhooks` | `/api/v1/webhooks/evenements`, et l'abonnement de la connexion avec ses livraisons |
+
+Une route hors des accès cochés renvoie `403`, comme toute requête `POST`,
+`PUT` ou `DELETE` : le système tiers ne modifie rien.
+
+### Création
 
 ```json
-{ "nom": "IMF Shield", "url_reception": "http://localhost:5678/webhook/sfd/v1/events", "evenements": [] }
+{
+  "nom": "IMF Shield",
+  "url_reception": "http://localhost:5678/webhook/sfd/v1/events",
+  "evenements": [],
+  "acces": ["clients", "comptes", "transactions", "referentiels"]
+}
 ```
 
 Réponse (`201`) :
@@ -346,17 +369,25 @@ Réponse (`201`) :
 ```json
 {
   "connexion_id": "CNX-EXT-0001",
-  "api": { "url_base": "http://127.0.0.1:8011/api/v1", "jeton": "<jeton>", "portee": "lecture" },
+  "api": { "url_base": "http://127.0.0.1:8011/api/v1", "jeton": "<jeton>", "portee": "lecture", "acces": ["clients", "comptes", "transactions", "referentiels"] },
   "webhook": { "abonnement_id": "WH-EXT-0003", "url_reception": "http://localhost:5678/webhook/sfd/v1/events", "secret": "<secret>", "evenements": [] }
 }
 ```
 
-Ce que permet le jeton : toutes les routes `GET` (clients, comptes,
-transactions, référentiels, journal des accès, abonnements et livraisons de
-webhooks). Toute requête `POST`, `PUT` ou `DELETE` est refusée : le système
-tiers ne modifie rien.
+### Modification
 
-Sécurité :
+`PUT /api/v1/connexions/{id}` garde le jeton et le secret existants :
+
+- changer `acces` ou `evenements` s'applique immédiatement ;
+- `url_reception: null` coupe le webhook ; une nouvelle adresse le réactive,
+  avec le même secret ;
+- ajouter des accès à une connexion sans jeton, ou une adresse à une connexion
+  sans webhook, les crée : leurs secrets sont renvoyés une fois dans
+  `nouveaux_acces`, au même format que la création.
+
+Une connexion révoquée ne se modifie plus (`409`).
+
+### Sécurité
 
 - le jeton (`secrets.token_urlsafe(32)`) n'est stocké que sous forme
   d'empreinte SHA-256, avec ses 8 premiers caractères pour l'affichage (table

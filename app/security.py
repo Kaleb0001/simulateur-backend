@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import json
 from dataclasses import dataclass
 
 from fastapi import Depends, Header, HTTPException, Request, status
@@ -13,6 +14,16 @@ from .utils import maintenant_utc
 
 # Ce qu'un jeton en lecture seule a le droit de faire.
 METHODES_LECTURE = {"GET", "HEAD", "OPTIONS"}
+
+# Le périmètre (voir schemas.PerimetreAcces) dont relève chaque préfixe de route.
+PERIMETRES = {
+    "/api/v1/clients": "clients",
+    "/api/v1/comptes": "comptes",
+    "/api/v1/transactions": "transactions",
+    "/api/v1/referentiels": "referentiels",
+    "/api/v1/journal-acces": "journal",
+    "/api/v1/webhooks": "webhooks",
+}
 
 
 @dataclass
@@ -86,7 +97,34 @@ def get_current_consumer(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Ce jeton est en lecture seule : seules les requêtes GET sont autorisées.",
         )
+    _verifier_perimetre(db, consommateur, request.url.path)
     return ApiConsumer(nom=consommateur.nom, portee=consommateur.portee, admin=False)
+
+
+def _verifier_perimetre(db: Session, consommateur: models.ConsommateurApi, chemin: str) -> None:
+    """Un jeton de connexion ne lit que les données cochées pour sa connexion ;
+    pour les webhooks, seulement son propre abonnement et ses livraisons."""
+    connexion = db.scalar(
+        select(models.Connexion).where(models.Connexion.consommateur_id == consommateur.id)
+    )
+    autorises = set(json.loads(connexion.acces or "[]")) if connexion else set()
+    perimetre = next(
+        (nom for prefixe, nom in PERIMETRES.items() if chemin == prefixe or chemin.startswith(prefixe + "/")),
+        None,
+    )
+    refus = HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Ce jeton n'a pas accès à ces données.",
+    )
+    if perimetre is None or perimetre not in autorises:
+        raise refus
+    if perimetre == "webhooks":
+        propres = {"/api/v1/webhooks/evenements"}
+        if connexion.abonnement is not None:
+            base = f"/api/v1/webhooks/{connexion.abonnement.external_id}"
+            propres |= {base, base + "/livraisons"}
+        if chemin not in propres:
+            raise refus
 
 
 def exiger_admin(consommateur: ApiConsumer = Depends(get_current_consumer)) -> ApiConsumer:

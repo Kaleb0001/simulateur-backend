@@ -338,19 +338,23 @@ class ConsommateurApi(Base):
 
 
 class Connexion(Base):
-    """Un système tiers connecté : son abonnement webhook et son jeton API,
-    créés ensemble et révoqués ensemble."""
+    """Un système tiers connecté. Il reçoit des événements (abonnement
+    webhook), lit des données (jeton API en lecture seule), ou les deux ; la
+    révocation coupe tout."""
 
     __tablename__ = "connexions"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     external_id: Mapped[str] = mapped_column(String(32), unique=True, index=True)
     nom: Mapped[str] = mapped_column(String(120))
-    url_reception: Mapped[str] = mapped_column(String(500))
-    # Liste JSON des événements suivis ; vide = tous les événements.
-    evenements: Mapped[str] = mapped_column(Text, default="[]", server_default="[]")
-    abonnement_id: Mapped[int] = mapped_column(ForeignKey("webhook_abonnements.id"))
-    consommateur_id: Mapped[int] = mapped_column(ForeignKey("consommateurs_api.id"))
+    # Liste JSON des données que le jeton peut lire (voir schemas.PerimetreAcces).
+    acces: Mapped[str] = mapped_column(Text, default="[]", server_default="[]")
+    abonnement_id: Mapped[int | None] = mapped_column(
+        ForeignKey("webhook_abonnements.id"), nullable=True
+    )
+    consommateur_id: Mapped[int | None] = mapped_column(
+        ForeignKey("consommateurs_api.id"), nullable=True
+    )
     statut: Mapped[str] = mapped_column(String(16), default="active", server_default="active")
     revoquee_le: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
@@ -359,6 +363,5 @@ class Connexion(Base):
         DateTime, server_default=func.now(), onupdate=func.now()
     )
 
-    abonnement: Mapped["WebhookAbonnement"] = relationship()
-    consommateur: Mapped["ConsommateurApi"] = relationship()
-
+    abonnement: Mapped["WebhookAbonnement | None"] = relationship()
+    consommateur: Mapped["ConsommateurApi | None"] = relationship()

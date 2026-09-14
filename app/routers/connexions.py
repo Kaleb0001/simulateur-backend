@@ -20,9 +20,10 @@ def creer_connexion(
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> schemas.ConnexionCreee:
-    """Connecte un système tiers : crée son abonnement webhook et un jeton API
-    en lecture seule. Le jeton et le secret de signature ne sont renvoyés
-    qu'ici ; ils restent valables jusqu'à la révocation."""
+    """Connecte un système tiers : un abonnement webhook (si `url_reception`
+    est fourni) et un jeton API en lecture seule limité aux données de
+    `acces` (si la liste n'est pas vide). Le jeton et le secret ne sont
+    renvoyés qu'ici ; ils restent valables jusqu'à la révocation."""
     return crud.creer_connexion(db, payload, settings)
 
 
@@ -41,6 +42,18 @@ def lister_connexions(
 @router.get("/{external_id}", response_model=schemas.ConnexionRead)
 def obtenir_connexion(external_id: str, db: Session = Depends(get_db)) -> schemas.ConnexionRead:
     return crud.to_read(crud.obtenir_connexion(db, external_id))
+
+
+@router.put("/{external_id}", response_model=schemas.ConnexionModifiee)
+def modifier_connexion(
+    external_id: str,
+    payload: schemas.ConnexionUpdate,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> schemas.ConnexionModifiee:
+    """Change le nom, l'adresse de réception, les événements ou les accès,
+    sans changer le jeton ni le secret."""
+    return crud.modifier_connexion(db, crud.obtenir_connexion(db, external_id), payload, settings)
 
 
 @router.post("/{external_id}/revoquer", response_model=schemas.ConnexionRead)

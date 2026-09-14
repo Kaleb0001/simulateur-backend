@@ -188,7 +188,11 @@ _TYPES_COMPTE_HISTORIQUES = {
 
 
 # Colonnes retirées du modèle, supprimées de la base au démarrage.
-_COLONNES_RETIREES = {"clients": ["source_revenus"]}
+_COLONNES_RETIREES = {
+    "clients": ["source_revenus"],
+    # L'adresse et les événements d'une connexion vivent dans son abonnement.
+    "connexions": ["url_reception", "evenements"],
+}
 
 
 def supprimer_colonnes_retirees(engine: Engine) -> list[str]:

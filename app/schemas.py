@@ -670,13 +670,51 @@ class StatutConnexion(str, Enum):
     revoquee = "revoquee"
 
 
+class PerimetreAcces(str, Enum):
+    """Ce que le jeton d'une connexion peut lire, toujours en lecture seule."""
+
+    clients = "clients"  # clients, avec documents et bénéficiaires effectifs
+    comptes = "comptes"
+    transactions = "transactions"
+    referentiels = "referentiels"
+    journal = "journal"  # journal des accès
+    webhooks = "webhooks"  # l'abonnement de la connexion et ses livraisons
+
+
+CONNEXION_VIDE = "Une connexion doit recevoir des événements (url_reception) ou lire des données (acces)."
+
+
 class ConnexionCreate(BaseModel):
     nom: str = Field(min_length=1, max_length=120, description="Ex. « IMF Shield ».")
-    url_reception: HttpUrl = Field(description="Adresse qui reçoit les webhooks.")
+    url_reception: HttpUrl | None = Field(
+        default=None, description="Adresse qui reçoit les webhooks. Absente : aucun webhook."
+    )
     evenements: list[EvenementWebhook] = Field(
         default_factory=list,
         description="Événements suivis. Liste vide : tous les événements.",
     )
+    acces: list[PerimetreAcces] = Field(
+        default_factory=list,
+        description="Données que le jeton peut lire. Liste vide : aucun jeton.",
+    )
+
+    @model_validator(mode="after")
+    def _au_moins_un_acces(self):
+        if self.url_reception is None and not self.acces:
+            raise ValueError(CONNEXION_VIDE)
+        return self
+
+
+class ConnexionUpdate(BaseModel):
+    """Modifie une connexion sans changer son jeton ni son secret. Ajouter un
+    webhook ou des accès à une connexion qui n'en avait pas les crée, et leurs
+    secrets sont alors renvoyés une fois. `url_reception: null` coupe le
+    webhook."""
+
+    nom: str | None = Field(default=None, min_length=1, max_length=120)
+    url_reception: HttpUrl | None = None
+    evenements: list[EvenementWebhook] | None = None
+    acces: list[PerimetreAcces] | None = None
 
 
 class ConsommateurApiRead(BaseModel):
@@ -687,16 +725,22 @@ class ConsommateurApiRead(BaseModel):
     derniere_utilisation: datetime | None = None
 
 
+class WebhookConnexionRead(BaseModel):
+    abonnement_id: str
+    url_reception: str
+    evenements: list[EvenementWebhook]
+    actif: bool
+
+
 class ConnexionRead(BaseModel):
     """Une connexion, sans aucun secret."""
 
     external_id: str
     nom: str
-    url_reception: str
-    evenements: list[EvenementWebhook]
     statut: StatutConnexion
-    abonnement_id: str
-    consommateur: ConsommateurApiRead
+    acces: list[PerimetreAcces]
+    webhook: WebhookConnexionRead | None = None
+    consommateur: ConsommateurApiRead | None = None
     created_at: datetime
     updated_at: datetime
     revoquee_le: datetime | None = None
@@ -713,6 +757,7 @@ class AccesApi(BaseModel):
     url_base: str
     jeton: str
     portee: PorteeJeton
+    acces: list[PerimetreAcces]
 
 
 class AccesWebhook(BaseModel):
@@ -723,9 +768,16 @@ class AccesWebhook(BaseModel):
 
 
 class ConnexionCreee(BaseModel):
-    """Réponse à la création : le jeton et le secret ne sont renvoyés qu'ici."""
+    """Réponse à la création : le jeton et le secret ne sont renvoyés qu'ici.
+    `api` est absent sans accès demandé, `webhook` sans adresse de réception."""
 
     connexion_id: str
-    api: AccesApi
-    webhook: AccesWebhook
+    api: AccesApi | None = None
+    webhook: AccesWebhook | None = None
 
+
+class ConnexionModifiee(ConnexionRead):
+    """Réponse à la modification. `nouveaux_acces` ne porte que les secrets
+    créés par cette modification (jeton ou webhook ajouté), sinon il est vide."""
+
+    nouveaux_acces: ConnexionCreee | None = None
