@@ -21,11 +21,11 @@ normaliser_referentiels(engine)
 adapter_schema(engine)
 
 app = FastAPI(
-    title="Simulateur de système de gestion interne d'IMF",
+    title="Simulateur de système de gestion interne de SFD",
     description=(
         "API de gestion interne (clients, comptes, transactions) exposée par "
-        "une IMF pour ses propres besoins, et consultable par des systèmes "
-        "tiers (ex. Vigie) qui viennent y récupérer ce dont ils ont besoin, ou "
+        "un SFD pour ses propres besoins, et consultable par des systèmes "
+        "tiers (ex. IMF SHIELD) qui viennent y récupérer ce dont ils ont besoin, ou "
         "qui s'abonnent à ses événements par webhook."
     ),
     version="2.0.0",

@@ -2,7 +2,7 @@
 revenus, sources des fonds, motifs de retrait, types de compte.
 
 Chaque valeur a un code stable et un libellé. Le code est ce qui est stocké et
-échangé : un consommateur (Vigie) peut raisonner dessus, par exemple repérer
+échangé : un consommateur (IMF SHIELD) peut raisonner dessus, par exemple repérer
 un client « etudiant » déclaré avec une tranche de revenus élevée. Les
 libellés ne servent qu'à l'affichage.
 

@@ -61,7 +61,7 @@ class LimiteRequetesSimultanees:
 class JournalAccesMiddleware(BaseHTTPMiddleware):
     """Journalise chaque requête reçue par l'API.
 
-    Utile pendant la démo pour visualiser en direct le moment où Vigie (ou
+    Utile pendant la démo pour visualiser en direct le moment où IMF SHIELD (ou
     tout autre consommateur) vient interroger l'API, puisque ce système
     n'émet plus lui-même aucun appel sortant.
     """

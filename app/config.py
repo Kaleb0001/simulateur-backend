@@ -54,7 +54,7 @@ class Settings(BaseSettings):
 
         Une seule clé partagée suffit pour la démo (SIMULATEUR_API_TOKEN),
         mais la forme en dict permet d'ajouter facilement d'autres
-        clés/consommateurs plus tard (ex. une clé dédiée pour Vigie et une
+        clés/consommateurs plus tard (ex. une clé dédiée pour IMF SHIELD et une
         autre pour le futur frontend) sans changer le code appelant.
         """
         keys: dict[str, str] = {}

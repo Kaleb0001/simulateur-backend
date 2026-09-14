@@ -7,7 +7,7 @@ from .database import Base
 
 
 class Agence(Base):
-    """Les agences de l'IMF : un client est rattaché à l'une d'elles."""
+    """Les agences du SFD : un client est rattaché à l'une d'elles."""
 
     __tablename__ = "agences"
 
@@ -265,7 +265,7 @@ class JournalAcces(Base):
 
 
 class WebhookAbonnement(Base):
-    """Un système tiers abonné aux événements de ce système (ex. Vigie).
+    """Un système tiers abonné aux événements de ce système (ex. IMF SHIELD).
 
     Le secret sert à signer chaque envoi (HMAC-SHA256) pour que l'abonné
     vérifie qu'il vient bien d'ici. Il est conservé tel quel : une signature
