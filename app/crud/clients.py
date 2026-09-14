@@ -5,7 +5,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from .. import models, schemas
+from .. import models, referentiels, schemas
 from ..config import Settings
 from ..utils import generer_external_id, maintenant_utc, paginer
 from . import comptes as comptes_crud
@@ -69,6 +69,46 @@ def _verifier_unicite_identifiants(
         )
 
 
+def _verifier_referentiels(db: Session, agence: str | None, profession: str | None) -> None:
+    """L'agence et la profession sont des codes des tables `agences` et
+    `professions` : un code inconnu est refusé comme un choix fermé invalide."""
+    erreurs = []
+    if agence is not None and db.get(models.Agence, agence) is None:
+        erreurs.append(
+            {
+                "type": "enum",
+                "loc": ["body", "agence"],
+                "msg": "Agence inconnue (voir GET /api/v1/referentiels).",
+                "input": agence,
+            }
+        )
+    if profession is not None and db.get(models.Profession, profession) is None:
+        erreurs.append(
+            {
+                "type": "enum",
+                "loc": ["body", "activite_professionnelle", "profession"],
+                "msg": "Profession inconnue (voir GET /api/v1/referentiels).",
+                "input": profession,
+            }
+        )
+    if erreurs:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=erreurs)
+
+
+def _valeur(valeur):
+    """La valeur stockée d'un choix fermé : son code, jamais l'objet Enum."""
+    return valeur.value if isinstance(valeur, Enum) else valeur
+
+
+def _revenus(tranche) -> dict:
+    """Les colonnes de revenus d'une tranche : son code et ses bornes."""
+    code = _valeur(tranche)
+    if code is None:
+        return {"tranche_revenus_mensuels": None, "revenus_mensuels_min": None, "revenus_mensuels_max": None}
+    _, minimum, maximum = referentiels.TRANCHES_REVENUS[code]
+    return {"tranche_revenus_mensuels": code, "revenus_mensuels_min": minimum, "revenus_mensuels_max": maximum}
+
+
 def _toucher_client(client: models.Client) -> None:
     """Fait remonter la date de modification du client lorsqu'une de ses
     sous-ressources change. Sans cela, l'ajout d'un document ou d'un
@@ -83,6 +123,7 @@ def _toucher_client(client: models.Client) -> None:
 def creer_client(
     db: Session, payload: schemas.ClientCreate, settings: Settings
 ) -> models.Client:
+    _verifier_referentiels(db, payload.agence, payload.activite_professionnelle.profession)
     _verifier_unicite_identifiants(
         db,
         type_client=payload.type.value,
@@ -120,12 +161,10 @@ def creer_client(
         latitude=payload.coordonnees_gps.latitude if payload.coordonnees_gps else None,
         longitude=payload.coordonnees_gps.longitude if payload.coordonnees_gps else None,
         secteur_activite=payload.activite_professionnelle.secteur_activite,
-        profession=payload.activite_professionnelle.profession,
+        profession=_valeur(payload.activite_professionnelle.profession),
         employeur=payload.activite_professionnelle.employeur,
-        revenus_mensuels_min=payload.activite_professionnelle.revenus_mensuels_min,
-        revenus_mensuels_max=payload.activite_professionnelle.revenus_mensuels_max,
+        **_revenus(payload.activite_professionnelle.tranche_revenus_mensuels),
         devise_revenus=payload.activite_professionnelle.devise_revenus,
-        source_revenus=payload.activite_professionnelle.source_revenus,
         autres_sources_revenus=payload.activite_professionnelle.autres_sources_revenus,
         objet_relation=payload.activite_professionnelle.objet_relation,
         canal_entree_relation=(
@@ -135,6 +174,8 @@ def creer_client(
         agent_traitant=payload.agent_traitant,
         ppe_est_ppe_ou_proche=payload.auto_declaration_ppe.est_ppe_ou_proche,
         ppe_precisions=payload.auto_declaration_ppe.precisions,
+        sanctions_est_sous_sanctions=payload.auto_declaration_sanctions.est_sous_sanctions,
+        sanctions_precisions=payload.auto_declaration_sanctions.precisions,
     )
     db.add(client)
     db.flush()  # attribue client.id
@@ -183,6 +224,7 @@ def lister_clients(
     decalage: int,
     type: schemas.TypeClient | None = None,
     agence: str | None = None,
+    nationalite: str | None = None,
     modifie_depuis: datetime | None = None,
     recherche: str | None = None,
 ) -> tuple[int, list[models.Client]]:
@@ -192,16 +234,20 @@ def lister_clients(
         stmt = stmt.where(models.Client.type == type.value)
     if agence is not None:
         stmt = stmt.where(models.Client.agence == agence)
+    if nationalite is not None:
+        stmt = stmt.where(models.Client.nationalite == nationalite)
     if modifie_depuis is not None:
         stmt = stmt.where(models.Client.updated_at >= modifie_depuis)
     if recherche:
         # Recherche partielle, insensible à la casse, sur les champs qu'un
-        # agent a sous la main : nom, prénoms et numéro d'identifiant légal
+        # agent a sous la main : identifiant du client (CL-EXT-0010, ou
+        # simplement 0010), nom, prénoms et numéro d'identifiant légal
         # (pièce d'identité pour une personne physique, RCCM/CUCE pour une
         # personne morale).
-        motif = f"%{recherche}%"
+        motif = f"%{recherche.strip()}%"
         stmt = stmt.where(
             or_(
+                models.Client.external_id.ilike(motif),
                 models.Client.nom.ilike(motif),
                 models.Client.prenoms.ilike(motif),
                 models.Client.numero_piece_identite.ilike(motif),
@@ -228,8 +274,11 @@ def mettre_a_jour_client(
     if "activite_professionnelle" in donnees and donnees["activite_professionnelle"] is not None:
         activite = donnees.pop("activite_professionnelle")
         autres_activites = activite.pop("autres_activites", None)
+        if "tranche_revenus_mensuels" in activite:
+            for champ, valeur in _revenus(activite.pop("tranche_revenus_mensuels")).items():
+                setattr(client, champ, valeur)
         for champ, valeur in activite.items():
-            setattr(client, champ, valeur)
+            setattr(client, champ, _valeur(valeur))
         if autres_activites is not None:
             _remplacer_autres_activites(
                 client, [schemas.AutreActivite(**a) for a in autres_activites]
@@ -244,6 +293,13 @@ def mettre_a_jour_client(
     else:
         donnees.pop("auto_declaration_ppe", None)
 
+    if "auto_declaration_sanctions" in donnees and donnees["auto_declaration_sanctions"] is not None:
+        sanctions = donnees.pop("auto_declaration_sanctions")
+        client.sanctions_est_sous_sanctions = sanctions["est_sous_sanctions"]
+        client.sanctions_precisions = sanctions["precisions"]
+    else:
+        donnees.pop("auto_declaration_sanctions", None)
+
     if "coordonnees_gps" in donnees:
         coordonnees = donnees.pop("coordonnees_gps")
         client.latitude = coordonnees["latitude"] if coordonnees else None
@@ -254,6 +310,7 @@ def mettre_a_jour_client(
         # doivent être stockés comme de simples chaînes en base.
         setattr(client, champ, valeur.value if isinstance(valeur, Enum) else valeur)
 
+    _verifier_referentiels(db, client.agence, client.profession)
     _verifier_dossier_coherent(client)
     _verifier_unicite_identifiants(
         db,
@@ -273,7 +330,7 @@ def mettre_a_jour_client(
 def _verifier_dossier_coherent(client: models.Client) -> None:
     """Après une mise à jour partielle, le dossier doit rester cohérent :
     une personne physique garde sa pièce d'identité, une personne morale son
-    RCCM et son CUCE.
+    RCCM, son CUCE et au moins un bénéficiaire effectif.
     """
     piece_identite = (
         schemas.PieceIdentite(
@@ -293,6 +350,11 @@ def _verifier_dossier_coherent(client: models.Client) -> None:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(erreur)
         ) from erreur
+    if client.type == schemas.TypeClient.morale.value and not client.beneficiaires_effectifs:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=schemas.BENEFICIAIRE_OBLIGATOIRE,
+        )
 
 
 # --------------------------------------------------------------------------
@@ -417,6 +479,12 @@ def mettre_a_jour_beneficiaire(
 
 
 def supprimer_beneficiaire(db: Session, beneficiaire: models.BeneficiaireEffectif) -> None:
+    client = beneficiaire.client
+    if client.type == schemas.TypeClient.morale.value and len(client.beneficiaires_effectifs) <= 1:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Le dernier bénéficiaire effectif d'une personne morale ne peut pas être retiré.",
+        )
     _toucher_client(beneficiaire.client)
     db.delete(beneficiaire)
     db.commit()
@@ -488,9 +556,10 @@ def to_read(client: models.Client) -> schemas.ClientRead:
             if client.latitude is not None and client.longitude is not None
             else None
         ),
-        activite_professionnelle=schemas.ActiviteProfessionnelle(
+        activite_professionnelle=schemas.ActiviteProfessionnelleRead(
             secteur_activite=client.secteur_activite,
             profession=client.profession,
+            tranche_revenus_mensuels=client.tranche_revenus_mensuels,
             autres_activites=[
                 schemas.AutreActivite(
                     secteur_activite=activite.secteur_activite,
@@ -502,7 +571,6 @@ def to_read(client: models.Client) -> schemas.ClientRead:
             revenus_mensuels_min=client.revenus_mensuels_min,
             revenus_mensuels_max=client.revenus_mensuels_max,
             devise_revenus=client.devise_revenus,
-            source_revenus=client.source_revenus,
             autres_sources_revenus=client.autres_sources_revenus,
             objet_relation=client.objet_relation,
         ),
@@ -521,6 +589,10 @@ def to_read(client: models.Client) -> schemas.ClientRead:
         auto_declaration_ppe=schemas.AutoDeclarationPPE(
             est_ppe_ou_proche=client.ppe_est_ppe_ou_proche,
             precisions=client.ppe_precisions,
+        ),
+        auto_declaration_sanctions=schemas.AutoDeclarationSanctions(
+            est_sous_sanctions=client.sanctions_est_sous_sanctions,
+            precisions=client.sanctions_precisions,
         ),
         comptes=[comptes_crud.to_read(c) for c in client.comptes],
         created_at=client.created_at,

@@ -1,9 +1,42 @@
 from datetime import date, datetime
 
-from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, func
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
+
+
+class Agence(Base):
+    """Les agences de l'IMF : un client est rattaché à l'une d'elles."""
+
+    __tablename__ = "agences"
+
+    code: Mapped[str] = mapped_column(String(64), primary_key=True)
+    nom: Mapped[str] = mapped_column(String(120), unique=True)
+    ville: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
+    ordre: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+
+
+class CategorieProfession(Base):
+    __tablename__ = "categories_profession"
+
+    code: Mapped[str] = mapped_column(String(64), primary_key=True)
+    libelle: Mapped[str] = mapped_column(String(120))
+    ordre: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+
+
+class Profession(Base):
+    """Liste fermée des professions. Le code est ce qu'un client stocke ;
+    `sans_employeur` marque les situations sans activité (élève, retraité…)."""
+
+    __tablename__ = "professions"
+
+    code: Mapped[str] = mapped_column(String(64), primary_key=True)
+    libelle: Mapped[str] = mapped_column(String(120))
+    categorie: Mapped[str] = mapped_column(String(64), ForeignKey("categories_profession.code"))
+    sans_employeur: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    ordre: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
 
 
 class Client(Base):
@@ -30,7 +63,7 @@ class Client(Base):
     adresse: Mapped[str] = mapped_column(String(500))
     telephone: Mapped[str] = mapped_column(String(32))
     email: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    agence: Mapped[str] = mapped_column(String(120))
+    agence: Mapped[str] = mapped_column(String(64), ForeignKey("agences.code"))
 
     # Situation familiale
     situation_matrimoniale: Mapped[str | None] = mapped_column(String(32), nullable=True)
@@ -46,12 +79,16 @@ class Client(Base):
 
     # Secteur et activite professionnelle
     secteur_activite: Mapped[str | None] = mapped_column(String(120), nullable=True)
-    profession: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    profession: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("professions.code"), nullable=True
+    )
     employeur: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Tranche fermée (voir referentiels.TRANCHES_REVENUS) ; les bornes
+    # ci-dessous en sont déduites et restent stockées pour la lecture.
+    tranche_revenus_mensuels: Mapped[str | None] = mapped_column(String(32), nullable=True)
     revenus_mensuels_min: Mapped[float | None] = mapped_column(Float, nullable=True)
     revenus_mensuels_max: Mapped[float | None] = mapped_column(Float, nullable=True)
     devise_revenus: Mapped[str | None] = mapped_column(String(8), nullable=True)
-    source_revenus: Mapped[str | None] = mapped_column(String(120), nullable=True)
     autres_sources_revenus: Mapped[str | None] = mapped_column(String(255), nullable=True)
     objet_relation: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
@@ -63,6 +100,13 @@ class Client(Base):
     # Auto-declaration PPE
     ppe_est_ppe_ou_proche: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     ppe_precisions: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+    # Auto-declaration sanctions : le client declare-t-il etre vise par une
+    # mesure de sanction (gel des avoirs, liste nationale ou internationale) ?
+    sanctions_est_sous_sanctions: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0"
+    )
+    sanctions_precisions: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
@@ -155,7 +199,10 @@ class Compte(Base):
     client_id: Mapped[int] = mapped_column(ForeignKey("clients.id"), index=True)
 
     numero_compte: Mapped[str] = mapped_column(String(32), unique=True, index=True)
-    type_compte: Mapped[str] = mapped_column(String(64))
+    type_compte: Mapped[str] = mapped_column(String(64))  # courant | epargne | bloque
+    # Compte bloque : date a partir de laquelle il redevient utilisable. Vide,
+    # le blocage n'a pas de terme.
+    date_deblocage: Mapped[date | None] = mapped_column(Date, nullable=True)
     devise: Mapped[str] = mapped_column(String(8))
     solde: Mapped[float] = mapped_column(Float, default=0)
 
@@ -187,6 +234,10 @@ class Transaction(Base):
     montant: Mapped[float] = mapped_column(Float)
     devise: Mapped[str] = mapped_column(String(8))
     canal: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Dépôt : source des fonds. Retrait : motif. Codes du référentiel.
+    source_fonds: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    motif_retrait: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    precision_motif: Mapped[str | None] = mapped_column(String(255), nullable=True)
     date_operation: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
@@ -211,3 +262,56 @@ class JournalAcces(Base):
     chemin: Mapped[str] = mapped_column(String(255))
     statut_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
     consommateur: Mapped[str | None] = mapped_column(String(120), nullable=True)
+
+
+class WebhookAbonnement(Base):
+    """Un système tiers abonné aux événements de ce système (ex. Vigie).
+
+    Le secret sert à signer chaque envoi (HMAC-SHA256) pour que l'abonné
+    vérifie qu'il vient bien d'ici. Il est conservé tel quel : une signature
+    ne peut pas se calculer à partir d'une empreinte.
+    """
+
+    __tablename__ = "webhook_abonnements"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    external_id: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    url: Mapped[str] = mapped_column(String(500))
+    description: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Liste JSON des événements suivis ; vide = tous les événements.
+    evenements: Mapped[str] = mapped_column(Text, default="[]", server_default="[]")
+    secret: Mapped[str] = mapped_column(String(128))
+    actif: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+
+    livraisons: Mapped[list["WebhookLivraison"]] = relationship(
+        back_populates="abonnement", cascade="all, delete-orphan"
+    )
+
+
+class WebhookLivraison(Base):
+    """Un envoi d'événement à un abonné, avec le résultat de sa dernière tentative."""
+
+    __tablename__ = "webhook_livraisons"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    external_id: Mapped[str] = mapped_column(String(40), unique=True, index=True)
+    abonnement_id: Mapped[int] = mapped_column(ForeignKey("webhook_abonnements.id"), index=True)
+    evenement: Mapped[str] = mapped_column(String(64))
+    charge_utile: Mapped[str] = mapped_column(Text)
+    statut: Mapped[str] = mapped_column(
+        String(16), default="en_attente", server_default="en_attente"
+    )  # en_attente | reussie | echouee
+    tentatives: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    dernier_code_http: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    derniere_reponse: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    derniere_erreur: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    livree_le: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    abonnement: Mapped["WebhookAbonnement"] = relationship(back_populates="livraisons")

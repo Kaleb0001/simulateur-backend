@@ -15,7 +15,7 @@ CLIENT_PAYLOAD = {
     "adresse": "Quartier Tokoin, Lomé",
     "telephone": "+22890123456",
     "email": "kodjo.mensah@example.com",
-    "agence": "Lomé-Centre",
+    "agence": "lome_centre",
     "situation_matrimoniale": "marie",
     "nom_conjoint": "Afiwa Mensah",
     "nom_pere": "Kwame Mensah",
@@ -25,12 +25,10 @@ CLIENT_PAYLOAD = {
     "coordonnees_gps": {"latitude": 6.1319, "longitude": 1.2228},
     "activite_professionnelle": {
         "secteur_activite": "Commerce",
-        "profession": "Commerçante",
+        "profession": "commercant",
         "employeur": "Indépendante",
-        "revenus_mensuels_min": 300000,
-        "revenus_mensuels_max": 400000,
+        "tranche_revenus_mensuels": "de_200001_a_500000",
         "devise_revenus": "XOF",
-        "source_revenus": "Activité commerciale",
         "objet_relation": "Épargne et financement de stock",
     },
     "documents": [
@@ -59,15 +57,14 @@ MORALE_PAYLOAD = {
     "numero_cuce": "CUCE-0099887",
     "adresse": "Zone portuaire, Lomé",
     "telephone": "+22822334455",
-    "agence": "Lomé-Port",
+    "agence": "lome_port",
     "activite_professionnelle": {
         "secteur_activite": "Import-export",
         "autres_activites": [
             {"secteur_activite": "Transport", "description": "Location de camions"},
             {"secteur_activite": "BTP"},
         ],
-        "revenus_mensuels_min": 5000000,
-        "revenus_mensuels_max": 12000000,
+        "tranche_revenus_mensuels": "de_10000001_a_15000000",
         "devise_revenus": "XOF",
         "objet_relation": "Financement d'activité",
     },
@@ -108,14 +105,17 @@ def test_creation_client_avec_compte_auto_cree(client):
     assert data["profession_mere"] == "Commerçante"
     assert data["coordonnees_gps"] == {"latitude": 6.1319, "longitude": 1.2228}
     assert data["activite_professionnelle"]["secteur_activite"] == "Commerce"
-    assert data["activite_professionnelle"]["revenus_mensuels_min"] == 300000
-    assert data["activite_professionnelle"]["revenus_mensuels_max"] == 400000
+    assert data["activite_professionnelle"]["profession"] == "commercant"
+    assert data["activite_professionnelle"]["tranche_revenus_mensuels"] == "de_200001_a_500000"
+    # Les bornes de la tranche sont données en lecture.
+    assert data["activite_professionnelle"]["revenus_mensuels_min"] == 200001
+    assert data["activite_professionnelle"]["revenus_mensuels_max"] == 500000
     assert len(data["documents"]) == 1
     assert data["documents"][0]["type_document"] == "CNI"
     assert len(data["comptes"]) == 1
 
     compte = data["comptes"][0]
-    assert compte["type_compte"] == "Courant"
+    assert compte["type_compte"] == "courant"
     assert compte["devise"] == "XOF"
     assert compte["solde"] == 0
     assert compte["numero_compte"].startswith("CPT-")
@@ -128,12 +128,12 @@ def test_creation_client_avec_compte_auto_cree(client):
 def test_creation_client_avec_compte_initial_personnalise(client):
     payload = dict(CLIENT_PAYLOAD)
     payload["piece_identite"] = {"type": "CNI", "numero": "TG-CPT-INIT-0001"}
-    payload["compte_initial"] = {"type_compte": "Épargne", "devise": "USD", "solde_initial": 5000}
+    payload["compte_initial"] = {"type_compte": "epargne", "devise": "USD", "solde_initial": 5000}
 
     response = client.post("/api/v1/clients", json=payload, headers=HEADERS)
     assert response.status_code == 201, response.text
     compte = response.json()["comptes"][0]
-    assert compte["type_compte"] == "Épargne"
+    assert compte["type_compte"] == "epargne"
     assert compte["devise"] == "USD"
     assert compte["solde"] == 5000
 
@@ -192,13 +192,13 @@ def test_lister_clients(client):
 def test_modifier_client(client):
     response = client.put(
         f"/api/v1/clients/{CLIENT_EXTERNAL_ID}",
-        json={"telephone": "+22899999999", "activite_professionnelle": {"profession": "Grossiste"}},
+        json={"telephone": "+22899999999", "activite_professionnelle": {"profession": "grossiste"}},
         headers=HEADERS,
     )
     assert response.status_code == 200, response.text
     data = response.json()
     assert data["telephone"] == "+22899999999"
-    assert data["activite_professionnelle"]["profession"] == "Grossiste"
+    assert data["activite_professionnelle"]["profession"] == "grossiste"
     # Les autres champs de l'activité professionnelle imbriquée restent en place.
     assert data["activite_professionnelle"]["secteur_activite"] == "Commerce"
 
@@ -213,15 +213,25 @@ def test_modifier_coordonnees_gps(client):
     assert response.json()["coordonnees_gps"] == {"latitude": 6.14, "longitude": 1.21}
 
 
-def test_plage_revenus_invalide_rejetee(client):
+def test_montants_de_revenus_libres_rejetes(client):
+    """Les revenus se déclarent par tranche : des montants libres sont refusés."""
     payload = dict(CLIENT_PAYLOAD)
     payload["piece_identite"] = {"type": "CNI", "numero": "TG-AUTRE-0001"}
     payload["activite_professionnelle"] = {
-        "revenus_mensuels_min": 500000,
-        "revenus_mensuels_max": 100000,
+        "revenus_mensuels_min": 100000,
+        "revenus_mensuels_max": 500000,
     }
     response = client.post("/api/v1/clients", json=payload, headers=HEADERS)
     assert response.status_code == 422
+
+
+def test_profession_et_tranche_hors_liste_rejetees(client):
+    for activite in ({"profession": "Vendeur de pagnes"}, {"tranche_revenus_mensuels": "300000"}):
+        payload = dict(CLIENT_PAYLOAD)
+        payload["piece_identite"] = {"type": "CNI", "numero": "TG-AUTRE-0002"}
+        payload["activite_professionnelle"] = activite
+        response = client.post("/api/v1/clients", json=payload, headers=HEADERS)
+        assert response.status_code == 422, activite
 
 
 def test_documents_sous_ressource(client):
@@ -274,12 +284,12 @@ def test_beneficiaires_effectifs_sous_ressource(client):
 def test_creation_compte_additionnel(client):
     response = client.post(
         f"/api/v1/clients/{CLIENT_EXTERNAL_ID}/comptes",
-        json={"type_compte": "Épargne", "devise": "XOF"},
+        json={"type_compte": "epargne", "devise": "XOF"},
         headers=HEADERS,
     )
     assert response.status_code == 201, response.text
     data = response.json()
-    assert data["type_compte"] == "Épargne"
+    assert data["type_compte"] == "epargne"
     assert data["client_external_id"] == CLIENT_EXTERNAL_ID
 
     global COMPTE_EPARGNE_EXTERNAL_ID
@@ -298,7 +308,7 @@ def test_lister_comptes_par_client(client):
 def test_transaction_depot_et_retrait(client):
     response = client.post(
         f"/api/v1/comptes/{COMPTE_EXTERNAL_ID}/transactions",
-        json={"type_operation": "depot", "montant": 10000, "canal": "agence"},
+        json={"type_operation": "depot", "montant": 10000, "canal": "agence", "source_fonds": "activite_commerciale"},
         headers=HEADERS,
     )
     assert response.status_code == 201, response.text
@@ -309,7 +319,7 @@ def test_transaction_depot_et_retrait(client):
 
     response = client.post(
         f"/api/v1/comptes/{COMPTE_EXTERNAL_ID}/transactions",
-        json={"type_operation": "retrait", "montant": 4000, "canal": "agence"},
+        json={"type_operation": "retrait", "montant": 4000, "canal": "agence", "motif_retrait": "achat_marchandises"},
         headers=HEADERS,
     )
     assert response.status_code == 201
@@ -320,7 +330,7 @@ def test_transaction_depot_et_retrait(client):
 def test_transaction_retrait_solde_insuffisant(client):
     response = client.post(
         f"/api/v1/comptes/{COMPTE_EXTERNAL_ID}/transactions",
-        json={"type_operation": "retrait", "montant": 999999},
+        json={"type_operation": "retrait", "montant": 999999, "motif_retrait": "construction"},
         headers=HEADERS,
     )
     assert response.status_code == 400
@@ -553,3 +563,208 @@ def test_ajout_document_fait_remonter_updated_at_du_client(client):
         "/api/v1/clients", params={"modifie_depuis": apres}, headers=HEADERS
     ).json()
     assert any(c["external_id"] == CLIENT_MORALE_EXTERNAL_ID for c in vus["resultats"])
+
+
+# --------------------------------------------------------------------------
+# Auto-déclaration sanctions, référentiels, types de compte
+# --------------------------------------------------------------------------
+
+
+def test_auto_declaration_sanctions(client):
+    payload = dict(CLIENT_PAYLOAD)
+    payload["piece_identite"] = {"type": "CNI", "numero": "TG-SANCTION-01"}
+    payload["documents"] = []
+    response = client.post("/api/v1/clients", json=payload, headers=HEADERS)
+    assert response.status_code == 201, response.text
+    data = response.json()
+    assert data["auto_declaration_sanctions"] == {"est_sous_sanctions": False, "precisions": None}
+
+    response = client.put(
+        f"/api/v1/clients/{data['external_id']}",
+        json={"auto_declaration_sanctions": {"est_sous_sanctions": True, "precisions": "Gel des avoirs"}},
+        headers=HEADERS,
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["auto_declaration_sanctions"] == {
+        "est_sous_sanctions": True,
+        "precisions": "Gel des avoirs",
+    }
+
+
+def test_referentiels(client):
+    response = client.get("/api/v1/referentiels", headers=HEADERS)
+    assert response.status_code == 200
+    data = response.json()
+    etudiant = next(p for p in data["professions"] if p["code"] == "etudiant")
+    assert etudiant == {"code": "etudiant", "libelle": "Étudiant", "categorie": "sans_activite", "sans_employeur": True}
+    assert [t["code"] for t in data["types_compte"]] == ["courant", "epargne", "bloque"]
+    assert data["tranches_revenus_mensuels"][-1]["maximum"] is None
+
+
+def test_type_de_compte_hors_liste_rejete(client):
+    response = client.post(
+        f"/api/v1/clients/{CLIENT_EXTERNAL_ID}/comptes",
+        json={"type_compte": "Dépôt à terme"},
+        headers=HEADERS,
+    )
+    assert response.status_code == 422
+
+
+def test_date_de_deblocage_reservee_au_compte_bloque(client):
+    response = client.post(
+        f"/api/v1/clients/{CLIENT_EXTERNAL_ID}/comptes",
+        json={"type_compte": "epargne", "date_deblocage": "2030-01-01"},
+        headers=HEADERS,
+    )
+    assert response.status_code == 422
+
+
+def test_compte_bloque_sans_terme_refuse_toute_operation(client):
+    compte = client.post(
+        f"/api/v1/clients/{CLIENT_EXTERNAL_ID}/comptes",
+        json={"type_compte": "bloque", "solde_initial": 100000},
+        headers=HEADERS,
+    ).json()
+    assert compte["est_bloque"] is True
+
+    for operation in ("depot", "retrait"):
+        response = client.post(
+            f"/api/v1/comptes/{compte['external_id']}/transactions",
+            json={"type_operation": operation, "montant": 1000, **({"source_fonds": "salaire"} if operation == "depot" else {"motif_retrait": "voyage"})},
+            headers=HEADERS,
+        )
+        assert response.status_code == 400, operation
+        assert "bloqué" in response.json()["detail"]
+
+    # Un virement vers un compte bloqué est refusé aussi.
+    response = client.post(
+        f"/api/v1/comptes/{COMPTE_EXTERNAL_ID}/transactions",
+        json={"type_operation": "virement", "montant": 10, "compte_destination_external_id": compte["external_id"]},
+        headers=HEADERS,
+    )
+    assert response.status_code == 400
+
+
+def test_compte_bloque_jusqu_a_une_date(client):
+    futur = client.post(
+        f"/api/v1/clients/{CLIENT_EXTERNAL_ID}/comptes",
+        json={"type_compte": "bloque", "date_deblocage": "2999-01-01"},
+        headers=HEADERS,
+    ).json()
+    assert futur["est_bloque"] is True
+    refus = client.post(
+        f"/api/v1/comptes/{futur['external_id']}/transactions",
+        json={"type_operation": "depot", "montant": 1000, "source_fonds": "tontine"},
+        headers=HEADERS,
+    )
+    assert refus.status_code == 400
+    assert "01/01/2999" in refus.json()["detail"]
+
+    passe = client.post(
+        f"/api/v1/clients/{CLIENT_EXTERNAL_ID}/comptes",
+        json={"type_compte": "bloque", "date_deblocage": "2020-01-01"},
+        headers=HEADERS,
+    ).json()
+    assert passe["est_bloque"] is False
+    depot = client.post(
+        f"/api/v1/comptes/{passe['external_id']}/transactions",
+        json={"type_operation": "depot", "montant": 1000, "source_fonds": "tontine"},
+        headers=HEADERS,
+    )
+    assert depot.status_code == 201, depot.text
+
+
+def test_depot_sans_source_et_retrait_sans_motif_refuses(client):
+    for corps in (
+        {"type_operation": "depot", "montant": 1000},
+        {"type_operation": "retrait", "montant": 1000},
+        {"type_operation": "depot", "montant": 1000, "source_fonds": "salaire", "motif_retrait": "voyage"},
+        {"type_operation": "virement", "montant": 10, "source_fonds": "salaire"},
+        {"type_operation": "depot", "montant": 1000, "source_fonds": "loterie"},
+    ):
+        reponse = client.post(f"/api/v1/comptes/{COMPTE_EXTERNAL_ID}/transactions", json=corps, headers=HEADERS)
+        assert reponse.status_code == 422, corps
+
+
+def test_source_et_motif_restitues(client):
+    depot = client.post(
+        f"/api/v1/comptes/{COMPTE_EXTERNAL_ID}/transactions",
+        json={"type_operation": "depot", "montant": 2000, "source_fonds": "autre", "precision_motif": "Gain de loterie"},
+        headers=HEADERS,
+    )
+    assert depot.status_code == 201, depot.text
+    data = depot.json()
+    assert (data["source_fonds"], data["motif_retrait"], data["precision_motif"]) == ("autre", None, "Gain de loterie")
+
+
+def test_personne_morale_sans_beneficiaire_refusee(client):
+    payload = dict(MORALE_PAYLOAD) | {"numero_rccm": "TG-SANS-BEN", "numero_cuce": "CUCE-SANS-BEN", "beneficiaires_effectifs": []}
+    reponse = client.post("/api/v1/clients", json=payload, headers=HEADERS)
+    assert reponse.status_code == 422
+    assert "au moins un bénéficiaire effectif" in reponse.text
+
+
+def test_dernier_beneficiaire_d_une_personne_morale_non_retirable(client):
+    payload = dict(MORALE_PAYLOAD) | {"numero_rccm": "TG-UN-BEN", "numero_cuce": "CUCE-UN-BEN"}
+    morale = client.post("/api/v1/clients", json=payload, headers=HEADERS).json()
+    seul = morale["beneficiaires_effectifs"][0]["external_id"]
+    reponse = client.delete(f"/api/v1/clients/{morale['external_id']}/beneficiaires-effectifs/{seul}", headers=HEADERS)
+    assert reponse.status_code == 409
+
+
+def test_passage_en_personne_morale_sans_beneficiaire_refuse(client):
+    payload = dict(CLIENT_PAYLOAD) | {"piece_identite": {"type": "CNI", "numero": "TG-DEVIENT-MORALE"}, "documents": []}
+    physique = client.post("/api/v1/clients", json=payload, headers=HEADERS).json()
+    reponse = client.put(
+        f"/api/v1/clients/{physique['external_id']}",
+        json={"type": "morale", "piece_identite": None, "numero_rccm": "TG-DM", "numero_cuce": "CUCE-DM"},
+        headers=HEADERS,
+    )
+    assert reponse.status_code == 422
+
+
+def test_source_de_revenus_supprimee(client):
+    reponse = client.get(f"/api/v1/clients/{CLIENT_EXTERNAL_ID}", headers=HEADERS)
+    assert "source_revenus" not in reponse.json()["activite_professionnelle"]
+
+
+def test_recherche_par_identifiant_client(client):
+    for terme in (CLIENT_EXTERNAL_ID, CLIENT_EXTERNAL_ID.split("-")[-1], CLIENT_EXTERNAL_ID.lower()):
+        reponse = client.get("/api/v1/clients", params={"recherche": terme, "limite": 200}, headers=HEADERS)
+        assert reponse.status_code == 200
+        assert CLIENT_EXTERNAL_ID in [c["external_id"] for c in reponse.json()["resultats"]], terme
+
+
+def test_filtre_par_nationalite(client):
+    reponse = client.get("/api/v1/clients", params={"nationalite": "Togolaise", "limite": 200}, headers=HEADERS)
+    assert reponse.status_code == 200
+    resultats = reponse.json()["resultats"]
+    assert resultats and all(c["nationalite"] == "Togolaise" for c in resultats)
+    vide = client.get("/api/v1/clients", params={"nationalite": "Islande"}, headers=HEADERS).json()
+    assert vide["total"] == 0
+
+
+def test_referentiels_agences_et_professions_en_base(client):
+    donnees = client.get("/api/v1/referentiels", headers=HEADERS).json()
+    agences = {a["code"]: a for a in donnees["agences"]}
+    assert agences["kara"]["nom"] == "Kara"
+    professions = {p["code"]: p for p in donnees["professions"]}
+    assert professions["etudiant"]["sans_employeur"] is True
+    assert professions["commercant"]["sans_employeur"] is False
+
+
+def test_agence_inconnue_refusee(client):
+    payload = {**CLIENT_PAYLOAD, "agence": "Lomé-Centre"}
+    payload["piece_identite"] = {"type": "CNI", "numero": "AGENCE-INCONNUE-1"}
+    reponse = client.post("/api/v1/clients", json=payload, headers=HEADERS)
+    assert reponse.status_code == 422
+    assert reponse.json()["detail"][0]["loc"] == ["body", "agence"]
+
+
+def test_profession_inconnue_refusee(client):
+    payload = {**CLIENT_PAYLOAD, "piece_identite": {"type": "CNI", "numero": "PROF-INCONNUE-1"}}
+    payload["activite_professionnelle"] = {"profession": "astronaute"}
+    reponse = client.post("/api/v1/clients", json=payload, headers=HEADERS)
+    assert reponse.status_code == 422
+    assert reponse.json()["detail"][0]["loc"] == ["body", "activite_professionnelle", "profession"]
+

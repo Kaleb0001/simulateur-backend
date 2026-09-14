@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from .. import schemas
@@ -9,6 +9,8 @@ from ..crud import clients as clients_crud
 from ..database import get_db
 from ..models import Client
 from ..security import get_current_consumer
+from ..webhooks import emettre
+from ..crud import comptes as comptes_crud
 
 router = APIRouter(
     prefix="/api/v1/clients",
@@ -30,13 +32,14 @@ def lister_clients(
     decalage: int = Query(default=0, ge=0),
     type: schemas.TypeClient | None = None,
     agence: str | None = None,
+    nationalite: str | None = None,
     modifie_depuis: datetime | None = None,
     recherche: str | None = Query(
         default=None,
         description=(
-            "Recherche partielle, insensible à la casse, sur le nom, les "
-            "prénoms ou le numéro d'identifiant légal (pièce d'identité, "
-            "RCCM ou CUCE)."
+            "Recherche partielle, insensible à la casse, sur l'identifiant du "
+            "client, le nom, les prénoms ou le numéro d'identifiant légal "
+            "(pièce d'identité, RCCM ou CUCE)."
         ),
     ),
     db: Session = Depends(get_db),
@@ -47,6 +50,7 @@ def lister_clients(
         decalage,
         type=type,
         agence=agence,
+        nationalite=nationalite,
         modifie_depuis=modifie_depuis,
         recherche=recherche,
     )
@@ -67,20 +71,30 @@ def obtenir_client(external_id: str, db: Session = Depends(get_db)) -> schemas.C
 @router.post("", response_model=schemas.ClientRead, status_code=status.HTTP_201_CREATED)
 def creer_client(
     payload: schemas.ClientCreate,
+    taches: BackgroundTasks,
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> schemas.ClientRead:
     client = clients_crud.creer_client(db, payload, settings)
-    return clients_crud.to_read(client)
+    lecture = clients_crud.to_read(client)
+    emettre(db, taches, schemas.EvenementWebhook.client_cree, lecture.model_dump(mode="json"))
+    for compte in client.comptes:
+        emettre(db, taches, schemas.EvenementWebhook.compte_cree, comptes_crud.to_read(compte).model_dump(mode="json"))
+    return lecture
 
 
 @router.put("/{external_id}", response_model=schemas.ClientRead)
 def modifier_client(
-    external_id: str, payload: schemas.ClientUpdate, db: Session = Depends(get_db)
+    external_id: str,
+    payload: schemas.ClientUpdate,
+    taches: BackgroundTasks,
+    db: Session = Depends(get_db),
 ) -> schemas.ClientRead:
     client = _obtenir_client_ou_404(db, external_id)
     client = clients_crud.mettre_a_jour_client(db, client, payload)
-    return clients_crud.to_read(client)
+    lecture = clients_crud.to_read(client)
+    emettre(db, taches, schemas.EvenementWebhook.client_modifie, lecture.model_dump(mode="json"))
+    return lecture
 
 
 # --------------------------------------------------------------------------
@@ -94,11 +108,16 @@ def modifier_client(
     status_code=status.HTTP_201_CREATED,
 )
 def ajouter_document(
-    external_id: str, payload: schemas.DocumentCreate, db: Session = Depends(get_db)
+    external_id: str,
+    payload: schemas.DocumentCreate,
+    taches: BackgroundTasks,
+    db: Session = Depends(get_db),
 ) -> schemas.DocumentRead:
     client = _obtenir_client_ou_404(db, external_id)
     document = clients_crud.ajouter_document(db, client, payload)
-    return schemas.DocumentRead.model_validate(document)
+    lecture = schemas.DocumentRead.model_validate(document)
+    emettre(db, taches, schemas.EvenementWebhook.document_ajoute, {"client_external_id": external_id, **lecture.model_dump(mode="json")})
+    return lecture
 
 
 @router.put("/{external_id}/documents/{document_id}", response_model=schemas.DocumentRead)
@@ -106,6 +125,7 @@ def modifier_document(
     external_id: str,
     document_id: str,
     payload: schemas.DocumentUpdate,
+    taches: BackgroundTasks,
     db: Session = Depends(get_db),
 ) -> schemas.DocumentRead:
     client = _obtenir_client_ou_404(db, external_id)
@@ -113,16 +133,21 @@ def modifier_document(
     if document is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document introuvable.")
     document = clients_crud.mettre_a_jour_document(db, document, payload)
-    return schemas.DocumentRead.model_validate(document)
+    lecture = schemas.DocumentRead.model_validate(document)
+    emettre(db, taches, schemas.EvenementWebhook.document_modifie, {"client_external_id": external_id, **lecture.model_dump(mode="json")})
+    return lecture
 
 
 @router.delete("/{external_id}/documents/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
-def supprimer_document(external_id: str, document_id: str, db: Session = Depends(get_db)) -> None:
+def supprimer_document(
+    external_id: str, document_id: str, taches: BackgroundTasks, db: Session = Depends(get_db)
+) -> None:
     client = _obtenir_client_ou_404(db, external_id)
     document = clients_crud.get_document(db, client, document_id)
     if document is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document introuvable.")
     clients_crud.supprimer_document(db, document)
+    emettre(db, taches, schemas.EvenementWebhook.document_supprime, {"client_external_id": external_id, "external_id": document_id})
 
 
 # --------------------------------------------------------------------------
@@ -138,11 +163,14 @@ def supprimer_document(external_id: str, document_id: str, db: Session = Depends
 def ajouter_beneficiaire(
     external_id: str,
     payload: schemas.BeneficiaireEffectifCreate,
+    taches: BackgroundTasks,
     db: Session = Depends(get_db),
 ) -> schemas.BeneficiaireEffectifRead:
     client = _obtenir_client_ou_404(db, external_id)
     beneficiaire = clients_crud.ajouter_beneficiaire(db, client, payload)
-    return schemas.BeneficiaireEffectifRead.model_validate(beneficiaire)
+    lecture = schemas.BeneficiaireEffectifRead.model_validate(beneficiaire)
+    emettre(db, taches, schemas.EvenementWebhook.beneficiaire_ajoute, {"client_external_id": external_id, **lecture.model_dump(mode="json")})
+    return lecture
 
 
 @router.put(
@@ -153,6 +181,7 @@ def modifier_beneficiaire(
     external_id: str,
     beneficiaire_id: str,
     payload: schemas.BeneficiaireEffectifUpdate,
+    taches: BackgroundTasks,
     db: Session = Depends(get_db),
 ) -> schemas.BeneficiaireEffectifRead:
     client = _obtenir_client_ou_404(db, external_id)
@@ -162,7 +191,9 @@ def modifier_beneficiaire(
             status_code=status.HTTP_404_NOT_FOUND, detail="Bénéficiaire effectif introuvable."
         )
     beneficiaire = clients_crud.mettre_a_jour_beneficiaire(db, beneficiaire, payload)
-    return schemas.BeneficiaireEffectifRead.model_validate(beneficiaire)
+    lecture = schemas.BeneficiaireEffectifRead.model_validate(beneficiaire)
+    emettre(db, taches, schemas.EvenementWebhook.beneficiaire_modifie, {"client_external_id": external_id, **lecture.model_dump(mode="json")})
+    return lecture
 
 
 @router.delete(
@@ -170,7 +201,7 @@ def modifier_beneficiaire(
     status_code=status.HTTP_204_NO_CONTENT,
 )
 def supprimer_beneficiaire(
-    external_id: str, beneficiaire_id: str, db: Session = Depends(get_db)
+    external_id: str, beneficiaire_id: str, taches: BackgroundTasks, db: Session = Depends(get_db)
 ) -> None:
     client = _obtenir_client_ou_404(db, external_id)
     beneficiaire = clients_crud.get_beneficiaire(db, client, beneficiaire_id)
@@ -179,3 +210,4 @@ def supprimer_beneficiaire(
             status_code=status.HTTP_404_NOT_FOUND, detail="Bénéficiaire effectif introuvable."
         )
     clients_crud.supprimer_beneficiaire(db, beneficiaire)
+    emettre(db, taches, schemas.EvenementWebhook.beneficiaire_supprime, {"client_external_id": external_id, "external_id": beneficiaire_id})

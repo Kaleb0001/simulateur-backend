@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from .. import schemas
@@ -9,6 +9,7 @@ from ..crud import clients as clients_crud
 from ..crud import comptes as comptes_crud
 from ..database import get_db
 from ..security import get_current_consumer
+from ..webhooks import emettre
 
 # Pas de prefix commun : cette ressource est exposée à la fois sous
 # /api/v1/comptes (liste, détail) et sous /api/v1/clients/{...}/comptes
@@ -50,6 +51,7 @@ def obtenir_compte(external_id: str, db: Session = Depends(get_db)) -> schemas.C
 )
 def creer_compte_additionnel(
     client_external_id: str,
+    taches: BackgroundTasks,
     payload: schemas.CompteCreate | None = None,
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
@@ -60,4 +62,6 @@ def creer_compte_additionnel(
     compte = comptes_crud.creer_compte(db, client, settings, payload or schemas.CompteCreate())
     db.commit()
     db.refresh(compte)
-    return comptes_crud.to_read(compte)
+    lecture = comptes_crud.to_read(compte)
+    emettre(db, taches, schemas.EvenementWebhook.compte_cree, lecture.model_dump(mode="json"))
+    return lecture

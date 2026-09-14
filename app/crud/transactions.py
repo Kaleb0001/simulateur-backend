@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from .. import models, schemas
 from ..utils import generer_external_id, maintenant_utc, paginer
+from . import comptes as comptes_crud
 
 
 def creer_transaction(
@@ -39,6 +40,18 @@ def creer_transaction(
                 detail="Le compte de destination doit être différent du compte source.",
             )
 
+    for compte_vise in (compte, compte_destination):
+        if compte_vise is not None and comptes_crud.est_bloque(compte_vise):
+            terme = (
+                f" jusqu'au {compte_vise.date_deblocage.strftime('%d/%m/%Y')}"
+                if compte_vise.date_deblocage
+                else ""
+            )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Le compte {compte_vise.numero_compte} est bloqué{terme}\u00a0: aucune opération n'est possible.",
+            )
+
     if payload.type_operation == schemas.TypeOperation.depot:
         compte.solde += payload.montant
     else:  # retrait ou virement : débit du compte source
@@ -58,6 +71,9 @@ def creer_transaction(
         montant=payload.montant,
         devise=payload.devise or compte.devise,
         canal=payload.canal,
+        source_fonds=payload.source_fonds.value if payload.source_fonds else None,
+        motif_retrait=payload.motif_retrait.value if payload.motif_retrait else None,
+        precision_motif=payload.precision_motif,
         date_operation=payload.date_operation or maintenant_utc(),
         external_id="",
     )
@@ -144,6 +160,9 @@ def to_read(transaction: models.Transaction) -> schemas.TransactionRead:
         montant=transaction.montant,
         devise=transaction.devise,
         canal=transaction.canal,
+        source_fonds=transaction.source_fonds,
+        motif_retrait=transaction.motif_retrait,
+        precision_motif=transaction.precision_motif,
         date_operation=transaction.date_operation,
         created_at=transaction.created_at,
         updated_at=transaction.updated_at,

@@ -2,6 +2,8 @@ from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .schemas import TypeCompte
+
 
 class Settings(BaseSettings):
     """Configuration de l'application, lue depuis les variables d'environnement / .env.
@@ -14,12 +16,17 @@ class Settings(BaseSettings):
 
     simulateur_api_token: str = "change-moi-en-production"
 
-    type_compte_par_defaut: str = "Courant"
+    type_compte_par_defaut: TypeCompte = TypeCompte.courant
     devise_par_defaut: str = "XOF"
     solde_initial_par_defaut: float = 0
     prefixe_numero_compte: str = "CPT"
 
     database_url: str = "sqlite:///./simulateur_imf.db"
+
+    # Webhooks sortants
+    webhook_timeout_secondes: float = 5.0
+    webhook_tentatives_max: int = 3
+    webhook_delai_entre_tentatives_secondes: float = 2.0
 
     @property
     def api_keys(self) -> dict[str, str]:

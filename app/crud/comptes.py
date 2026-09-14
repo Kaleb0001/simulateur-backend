@@ -1,11 +1,11 @@
-from datetime import datetime
+from datetime import date, datetime
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .. import models, schemas
 from ..config import Settings
-from ..utils import generer_external_id, generer_numero_compte, paginer
+from ..utils import generer_external_id, generer_numero_compte, maintenant_utc, paginer
 
 
 def creer_compte(
@@ -29,7 +29,8 @@ def creer_compte(
 
     compte = models.Compte(
         client_id=client.id,
-        type_compte=type_compte,
+        type_compte=schemas.TypeCompte(type_compte).value,
+        date_deblocage=payload.date_deblocage if payload else None,
         devise=devise,
         solde=solde_initial,
         external_id="",
@@ -43,6 +44,18 @@ def creer_compte(
     db.flush()
 
     return compte
+
+
+def est_bloque(compte: models.Compte, aujourd_hui: date | None = None) -> bool:
+    """Un compte bloqué refuse toute opération, en entrée comme en sortie :
+    sans date de déblocage, le blocage n'a pas de terme ; avec une date, il
+    cesse à cette date.
+    """
+    if compte.type_compte != schemas.TypeCompte.bloque.value:
+        return False
+    if compte.date_deblocage is None:
+        return True
+    return (aujourd_hui or maintenant_utc().date()) < compte.date_deblocage
 
 
 def get_compte_by_external_id(db: Session, external_id: str) -> models.Compte | None:
@@ -72,7 +85,9 @@ def to_read(compte: models.Compte) -> schemas.CompteRead:
     return schemas.CompteRead(
         external_id=compte.external_id,
         numero_compte=compte.numero_compte,
-        type_compte=compte.type_compte,
+        type_compte=schemas.TypeCompte(compte.type_compte),
+        date_deblocage=compte.date_deblocage,
+        est_bloque=est_bloque(compte),
         devise=compte.devise,
         solde=compte.solde,
         client_external_id=compte.client.external_id,

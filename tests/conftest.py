@@ -9,6 +9,7 @@ _DB_FILE = Path(tempfile.gettempdir()) / "simulateur_imf_test.db"
 _DB_FILE.unlink(missing_ok=True)
 
 os.environ["SIMULATEUR_API_TOKEN"] = "test-token"
+os.environ["WEBHOOK_DELAI_ENTRE_TENTATIVES_SECONDES"] = "0"
 os.environ["DATABASE_URL"] = f"sqlite:///{_DB_FILE.as_posix()}"
 
 import pytest

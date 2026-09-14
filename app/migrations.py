@@ -9,8 +9,9 @@ démarrage, sans perdre les données.
 Deux écarts sont traités :
 
 - colonne présente dans le modèle mais absente de la base → ajoutée ;
-- colonne NOT NULL en base alors que le modèle l'autorise vide → la table
-  est reconstruite, SQLite ne sachant pas lever une contrainte NOT NULL.
+- colonne NOT NULL en base alors que le modèle l'autorise vide, ou clé
+  étrangère déclarée par le modèle mais absente de la base → la table est
+  reconstruite, SQLite ne sachant modifier ni l'une ni l'autre.
 
 Ce n'est pas un remplaçant d'Alembic : une colonne retirée du modèle est
 laissée en place, et une colonne obligatoire ajoutée sans valeur par défaut
@@ -49,7 +50,9 @@ def adapter_schema(engine: Engine) -> list[str]:
             colonne["name"]: colonne for colonne in inspecteur.get_columns(table.name)
         }
 
-        if _reconstruction_necessaire(table, colonnes_base):
+        if _reconstruction_necessaire(table, colonnes_base) or _cles_etrangeres_manquantes(
+            table, inspecteur
+        ):
             _reconstruire_table(engine, table, colonnes_base)
             operations.append(f"table « {table.name} » reconstruite")
             continue
@@ -90,6 +93,18 @@ def _reconstruction_necessaire(table: Table, colonnes_base: dict) -> bool:
         if colonne.nullable and not colonne_base["nullable"]:
             return True
         if colonne.server_default is not None and colonne_base["default"] is None:
+            return True
+    return False
+
+
+def _cles_etrangeres_manquantes(table: Table, inspecteur) -> bool:
+    en_base = {
+        (tuple(cle["constrained_columns"]), cle["referred_table"])
+        for cle in inspecteur.get_foreign_keys(table.name)
+    }
+    for cle in table.foreign_key_constraints:
+        colonnes = tuple(colonne.name for colonne in cle.columns)
+        if (colonnes, cle.referred_table.name) not in en_base:
             return True
     return False
 
@@ -152,3 +167,220 @@ def _index_de(connection: Connection, nom_table: str) -> list[str]:
         {"table": nom_table},
     )
     return [ligne[0] for ligne in resultat]
+
+
+# Anciennes valeurs libres de `comptes.type_compte`, ramenées aux types fermés.
+# « Dépôt à terme » est un compte immobilisé : il devient un compte bloqué.
+_TYPES_COMPTE_HISTORIQUES = {
+    "courant": "courant",
+    "compte courant": "courant",
+    "epargne": "epargne",
+    "épargne": "epargne",
+    "compte epargne": "epargne",
+    "compte épargne": "epargne",
+    "bloque": "bloque",
+    "bloqué": "bloque",
+    "compte bloque": "bloque",
+    "compte bloqué": "bloque",
+    "depot a terme": "bloque",
+    "dépôt à terme": "bloque",
+}
+
+
+# Colonnes retirées du modèle, supprimées de la base au démarrage.
+_COLONNES_RETIREES = {"clients": ["source_revenus"]}
+
+
+def supprimer_colonnes_retirees(engine: Engine) -> list[str]:
+    """Supprime les colonnes qu'un champ retiré du modèle a laissées en base
+    (SQLite 3.35 ou plus récent)."""
+    inspecteur = inspect(engine)
+    operations: list[str] = []
+    for table, colonnes in _COLONNES_RETIREES.items():
+        if table not in inspecteur.get_table_names():
+            continue
+        existantes = {c["name"] for c in inspecteur.get_columns(table)}
+        for colonne in colonnes:
+            if colonne not in existantes:
+                continue
+            with engine.begin() as connection:
+                connection.execute(text(f'ALTER TABLE "{table}" DROP COLUMN "{colonne}"'))
+            operations.append(f"colonne « {table}.{colonne} » supprimée")
+    for operation in operations:
+        logger.info("Schéma mis à niveau : %s", operation)
+    return operations
+
+
+def peupler_referentiels(engine: Engine) -> list[str]:
+    """Insère les agences, catégories et professions initiales qui manquent
+    en base. Une ligne existante n'est jamais modifiée : les tables peuvent
+    être enrichies ou corrigées à la main."""
+    from . import referentiels
+
+    lignes = {
+        "agences": [
+            {"code": code, "nom": nom, "ville": ville, "active": True, "ordre": ordre}
+            for ordre, (code, (nom, ville)) in enumerate(referentiels.AGENCES.items())
+        ],
+        "categories_profession": [
+            {"code": code, "libelle": libelle, "ordre": ordre}
+            for ordre, (code, libelle) in enumerate(referentiels.CATEGORIES_PROFESSION.items())
+        ],
+        "professions": [
+            {
+                "code": code,
+                "libelle": libelle,
+                "categorie": categorie,
+                "sans_employeur": categorie in referentiels.CATEGORIES_SANS_EMPLOYEUR,
+                "ordre": ordre,
+            }
+            for ordre, (code, (libelle, categorie)) in enumerate(referentiels.PROFESSIONS.items())
+        ],
+    }
+    operations: list[str] = []
+    with engine.begin() as connection:
+        for table, valeurs in lignes.items():
+            existants = {ligne[0] for ligne in connection.execute(text(f'SELECT code FROM "{table}"'))}
+            manquants = [valeur for valeur in valeurs if valeur["code"] not in existants]
+            if not manquants:
+                continue
+            colonnes = list(manquants[0])
+            connection.execute(
+                text(
+                    f'INSERT INTO "{table}" ({", ".join(colonnes)}) '
+                    f'VALUES ({", ".join(":" + c for c in colonnes)})'
+                ),
+                manquants,
+            )
+            operations.append(f"{len(manquants)} ligne(s) ajoutée(s) à « {table} »")
+    for operation in operations:
+        logger.info("Référentiels : %s", operation)
+    return operations
+
+
+def normaliser_referentiels(engine: Engine) -> list[str]:
+    """Ramène aux listes fermées les valeurs saisies librement avant elles :
+    types de compte, agences, professions et revenus mensuels (tranche
+    déduite des anciens montants)."""
+    return (
+        normaliser_types_compte(engine)
+        + _normaliser_agences(engine)
+        + _normaliser_activites(engine)
+    )
+
+
+# Anciens noms d'agence sans équivalent exact dans la table.
+_AGENCES_HISTORIQUES = {"lome": "lome_centre"}
+
+
+def _normaliser_agences(engine: Engine) -> list[str]:
+    """Remplace le nom d'agence saisi librement par le code de l'agence. Un
+    nom inconnu devient une nouvelle agence plutôt que d'être perdu."""
+    from . import referentiels
+
+    inspecteur = inspect(engine)
+    if not {"clients", "agences"} <= set(inspecteur.get_table_names()):
+        return []
+    operations: list[str] = []
+    with engine.begin() as connection:
+        agences = {
+            code: nom for code, nom in connection.execute(text("SELECT code, nom FROM agences"))
+        }
+        par_nom = {referentiels._code(nom): code for code, nom in agences.items()}
+        valeurs = [ligne[0] for ligne in connection.execute(text("SELECT DISTINCT agence FROM clients"))]
+        for valeur in valeurs:
+            if valeur is None or valeur in agences:
+                continue
+            cle = referentiels._code(valeur)
+            cible = par_nom.get(cle) or _AGENCES_HISTORIQUES.get(cle)
+            if cible is None:
+                cible = cle or "inconnue"
+                connection.execute(
+                    text("INSERT INTO agences (code, nom, active, ordre) VALUES (:code, :nom, 1, 999)"),
+                    {"code": cible, "nom": valeur.strip() or cible},
+                )
+                agences[cible] = valeur
+                par_nom[cle] = cible
+                operations.append(f"agence « {valeur} » créée")
+            connection.execute(
+                text("UPDATE clients SET agence = :cible WHERE agence = :valeur"),
+                {"cible": cible, "valeur": valeur},
+            )
+            operations.append(f"agence « {valeur} » convertie en « {cible} »")
+    for operation in operations:
+        logger.info("Données mises à niveau : %s", operation)
+    return operations
+
+
+def _normaliser_activites(engine: Engine) -> list[str]:
+    from . import referentiels
+
+    inspecteur = inspect(engine)
+    if "clients" not in inspecteur.get_table_names():
+        return []
+    colonnes = {c["name"] for c in inspecteur.get_columns("clients")}
+    if "tranche_revenus_mensuels" not in colonnes:
+        return []
+
+    operations: list[str] = []
+    with engine.begin() as connection:
+        connues = {ligne[0] for ligne in connection.execute(text("SELECT code FROM professions"))}
+        lignes = connection.execute(
+            text(
+                "SELECT id, profession, tranche_revenus_mensuels, revenus_mensuels_min, "
+                "revenus_mensuels_max FROM clients"
+            )
+        ).all()
+        for identifiant, profession, tranche, minimum, maximum in lignes:
+            nouvelles: dict = {}
+            if profession and profession not in connues:
+                nouvelles["profession"] = referentiels.profession_pour_texte(profession)
+            if tranche is None and (minimum is not None or maximum is not None):
+                code = referentiels.tranche_pour_montant(maximum if maximum is not None else minimum)
+                _, borne_min, borne_max = referentiels.TRANCHES_REVENUS[code]
+                nouvelles.update(
+                    tranche_revenus_mensuels=code,
+                    revenus_mensuels_min=borne_min,
+                    revenus_mensuels_max=borne_max,
+                )
+            if not nouvelles:
+                continue
+            affectations = ", ".join(f"{champ} = :{champ}" for champ in nouvelles)
+            connection.execute(
+                text(f"UPDATE clients SET {affectations} WHERE id = :id"), {**nouvelles, "id": identifiant}
+            )
+            operations.append(f"client {identifiant} : {', '.join(nouvelles)} normalisé")
+
+    for operation in operations:
+        logger.info("Données mises à niveau : %s", operation)
+    return operations
+
+
+def normaliser_types_compte(engine: Engine) -> list[str]:
+    """Convertit les types de compte saisis librement avant que le type ne
+    devienne un choix fermé (courant, epargne, bloque). Une valeur inconnue
+    devient « courant », et chaque conversion est journalisée.
+    """
+    inspecteur = inspect(engine)
+    if "comptes" not in inspecteur.get_table_names():
+        return []
+
+    operations: list[str] = []
+    with engine.begin() as connection:
+        valeurs = [
+            ligne[0]
+            for ligne in connection.execute(text("SELECT DISTINCT type_compte FROM comptes"))
+        ]
+        for valeur in valeurs:
+            cible = _TYPES_COMPTE_HISTORIQUES.get((valeur or "").strip().lower(), "courant")
+            if valeur == cible:
+                continue
+            connection.execute(
+                text("UPDATE comptes SET type_compte = :cible WHERE type_compte = :valeur"),
+                {"cible": cible, "valeur": valeur},
+            )
+            operations.append(f"type de compte « {valeur} » converti en « {cible} »")
+
+    for operation in operations:
+        logger.info("Données mises à niveau : %s", operation)
+    return operations

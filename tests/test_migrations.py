@@ -4,7 +4,7 @@ import pytest
 from sqlalchemy import create_engine, inspect, text
 
 from app.database import Base
-from app.migrations import adapter_schema
+from app.migrations import adapter_schema, peupler_referentiels
 
 # Schéma « ancien » : sans les colonnes ajoutées depuis (RCCM/CUCE, situation
 # familiale, coordonnées GPS, plage de revenus) et avec la pièce d'identité
@@ -147,3 +147,56 @@ def test_adaptation_reajoute_une_colonne_supprimee(engine_ancienne_base):
     assert operations == ["colonne « clients.numero_cuce » ajoutée"]
     colonnes = {c["name"] for c in inspect(engine_ancienne_base).get_columns("clients")}
     assert "numero_cuce" in colonnes
+
+
+def test_normalisation_des_referentiels(tmp_path):
+    from app.migrations import normaliser_referentiels
+
+    engine = create_engine(f"sqlite:///{(tmp_path / 'referentiels.db').as_posix()}")
+    Base.metadata.create_all(bind=engine)
+    peupler_referentiels(engine)
+    with engine.begin() as connection:
+        connection.execute(text(
+            "INSERT INTO clients (id, external_id, type, statut, nom, nationalite, adresse, telephone, agence, "
+            "profession, revenus_mensuels_min, revenus_mensuels_max, ppe_est_ppe_ou_proche, sanctions_est_sous_sanctions) "
+            "VALUES (1, 'CL-EXT-0001', 'physique', 'actif', 'Kodjo', 'Togo', 'Lomé', '1', 'Kara', "
+            "'Commerçante', 2500000, 4000000, 0, 0), (2, 'CL-EXT-0002', 'physique', 'actif', 'Ama', 'Togo', "
+            "'Lomé', '2', 'Agence de Vogan', 'etudiant', NULL, NULL, 0, 0)"
+        ))
+        connection.execute(text(
+            "INSERT INTO comptes (id, external_id, client_id, numero_compte, type_compte, devise, solde) "
+            "VALUES (1, 'CPT-EXT-0001', 1, 'CPT-000001', 'Dépôt à terme', 'XOF', 0)"
+        ))
+    normaliser_referentiels(engine)
+    with engine.connect() as connection:
+        client = connection.execute(text(
+            "SELECT profession, tranche_revenus_mensuels, revenus_mensuels_min, revenus_mensuels_max FROM clients "
+            "WHERE id = 1"
+        )).one()
+        agences = connection.execute(text("SELECT agence FROM clients ORDER BY id")).scalars().all()
+        vogan = connection.execute(text("SELECT nom FROM agences WHERE code = 'agence_de_vogan'")).scalar()
+        type_compte = connection.execute(text("SELECT type_compte FROM comptes")).scalar()
+    assert tuple(client) == ("commercant", "de_3000001_a_5000000", 3000001, 5000000)
+    assert type_compte == "bloque"
+    assert agences == ["kara", "agence_de_vogan"]
+    assert vogan == "Agence de Vogan"
+
+
+def test_peuplement_des_referentiels_idempotent(tmp_path):
+    engine = create_engine(f"sqlite:///{(tmp_path / 'peuplement.db').as_posix()}")
+    Base.metadata.create_all(bind=engine)
+    assert peupler_referentiels(engine)
+    assert peupler_referentiels(engine) == []
+
+
+def test_adaptation_ajoute_les_cles_etrangeres(engine_ancienne_base):
+    Base.metadata.create_all(bind=engine_ancienne_base)
+    adapter_schema(engine_ancienne_base)
+
+    cles = {
+        (tuple(cle["constrained_columns"]), cle["referred_table"])
+        for cle in inspect(engine_ancienne_base).get_foreign_keys("clients")
+    }
+    assert (("agence",), "agences") in cles
+    assert (("profession",), "professions") in cles
+

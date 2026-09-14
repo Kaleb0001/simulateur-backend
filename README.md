@@ -2,11 +2,11 @@
 
 API backend (FastAPI + SQLite) simulant l'outil de gestion interne d'une
 Institution de Microfinance : clients (dossier KYC), comptes et
-transactions. Ce système est **indépendant de Vigie** : il n'appelle jamais
-aucun système tiers, il se contente d'exposer des données via une API REST
-protégée par clé API. C'est à un consommateur externe (Vigie) d'interroger
-cette API, au rythme qui lui convient, avec un mécanisme de synchronisation
-incrémentale (`modifie_depuis`).
+transactions. Ce système est **indépendant de Vigie** : il expose ses données via une API REST
+protégée par clé API. Un consommateur externe (Vigie) peut interroger cette
+API au rythme qui lui convient, avec un mécanisme de synchronisation
+incrémentale (`modifie_depuis`), ou s'abonner à ses événements par webhook
+(voir « Webhooks sortants »).
 
 Voir [prompt-simulateur-imf-v2.md](prompt-simulateur-imf-v2.md) pour le
 cahier des charges complet.
@@ -67,16 +67,19 @@ clés/consommateurs plus tard sans changer le code des routes.
 | Variable | Rôle | Défaut |
 |---|---|---|
 | `SIMULATEUR_API_TOKEN` | Jeton API attendu | `change-moi-en-production` |
-| `TYPE_COMPTE_PAR_DEFAUT` | Type du compte auto-créé | `Courant` |
+| `TYPE_COMPTE_PAR_DEFAUT` | Type du compte auto-créé (`courant`, `epargne`, `bloque`) | `courant` |
 | `DEVISE_PAR_DEFAUT` | Devise par défaut des comptes | `XOF` |
 | `SOLDE_INITIAL_PAR_DEFAUT` | Solde initial des comptes | `0` |
 | `PREFIXE_NUMERO_COMPTE` | Préfixe du numéro de compte auto-généré | `CPT` |
 | `DATABASE_URL` | URL SQLAlchemy | `sqlite:///./simulateur_imf.db` |
+| `WEBHOOK_TIMEOUT_SECONDES` | Délai maximal d'un envoi de webhook | `5` |
+| `WEBHOOK_TENTATIVES_MAX` | Tentatives avant d'abandonner un envoi | `3` |
+| `WEBHOOK_DELAI_ENTRE_TENTATIVES_SECONDES` | Délai de base entre deux tentatives | `2` |
 
 ## Endpoints
 
 ### Clients
-- `GET /api/v1/clients` — liste paginée (`limite`, `decalage`), filtrable (`type`, `agence`, `modifie_depuis`) et recherchable (`recherche`)
+- `GET /api/v1/clients` — liste paginée (`limite`, `decalage`), filtrable (`type`, `agence`, `nationalite`, `modifie_depuis`) et recherchable (`recherche`)
 - `GET /api/v1/clients/{external_id}` — dossier complet (identité, activité professionnelle, bénéficiaires effectifs, documents, comptes)
 - `POST /api/v1/clients` — création (crée aussi automatiquement le premier compte du client)
 - `PUT /api/v1/clients/{external_id}` — modification **partielle** (seuls les champs fournis sont modifiés)
@@ -138,7 +141,8 @@ libellé à gérer côté frontend.
 ## Recherche de clients
 
 `GET /api/v1/clients?recherche=...` effectue une recherche partielle,
-insensible à la casse, sur le nom, les prénoms et le numéro d'identifiant
+insensible à la casse, sur l'identifiant du client (`CL-EXT-0010` ou
+`0010`), le nom, les prénoms et le numéro d'identifiant
 légal (pièce d'identité, RCCM ou CUCE). Elle se combine avec les autres
 filtres (`type`, `agence`, `modifie_depuis`) et avec la pagination.
 
@@ -229,6 +233,79 @@ développement sans blocage, les choix suivants ont été faits :
   source **ou** destination. La réponse expose aussi un nouveau champ
   `client_destination_external_id` pour identifier directement le client
   crédité sans appel supplémentaire.
+
+## Listes fermées (référentiels)
+
+`GET /api/v1/referentiels` renvoie les listes fermées de ce système, chacune
+avec le **code** à envoyer et le **libellé** à afficher :
+
+- `agences` : `agence` n'accepte que le code d'une agence (`lome_centre`,
+  `kara`…). Les agences vivent dans la table `agences`.
+- `professions` (et `categories_profession`) : `activite_professionnelle.profession`
+  n'accepte qu'un de ces codes (`etudiant`, `commercant`…). Elles vivent dans
+  les tables `professions` et `categories_profession` ; `sans_employeur` marque
+  les professions sans employeur (catégorie `sans_activite`).
+
+Un code d'agence ou de profession inconnu est refusé en 422. Les agences et
+professions initiales sont insérées au démarrage si elles manquent ; une ligne
+ajoutée à la main dans ces tables est aussitôt acceptée et listée.
+- `tranches_revenus_mensuels` : `activite_professionnelle.tranche_revenus_mensuels`
+  remplace la saisie de `revenus_mensuels_min` / `revenus_mensuels_max`, refusée
+  en 422. Les bornes de la tranche restent données en lecture.
+- `types_compte` : `courant`, `epargne`, `bloque`.
+- `sources_fonds` et `motifs_retrait` : voir « Transactions ».
+
+Une base plus ancienne est convertie au démarrage : professions reconnues par
+leur libellé (formes féminines comprises, « autre » sinon), tranche déduite des
+anciens montants, anciens types de compte ramenés à la liste, noms d'agence
+remplacés par leur code (un nom inconnu devient une nouvelle agence).
+
+## Auto-déclaration sanctions
+
+`auto_declaration_sanctions` (`{ est_sous_sanctions, precisions }`) complète
+l'auto-déclaration PPE : le client déclare être visé ou non par une mesure de
+sanction. Donnée déclarative, non vérifiée par ce système.
+
+## Comptes bloqués
+
+Un compte de type `bloque` refuse **toute** opération, en entrée comme en
+sortie (dépôt, retrait, virement émis ou reçu), avec un refus 400. Sa
+`date_deblocage`, facultative, fixe la fin du blocage : sans date, il est bloqué
+sans limite. `est_bloque` indique en lecture si le compte refuse les
+opérations aujourd'hui. `date_deblocage` est refusée pour un autre type.
+
+## Transactions : source des fonds et motif
+
+Un dépôt exige `source_fonds`, un retrait exige `motif_retrait` (codes des
+référentiels) ; un virement n'accepte ni l'un ni l'autre. `precision_motif`,
+facultatif, précise la réponse, par exemple pour « autre ».
+
+## Webhooks sortants
+
+Un système tiers peut s'abonner aux événements de ce système au lieu de venir
+les lire :
+
+- `POST /api/v1/webhooks` : abonnement (`url`, `evenements`, `description`,
+  `actif`). Le `secret` de signature est généré s'il n'est pas fourni, et n'est
+  renvoyé **qu'à la création**.
+- `GET /api/v1/webhooks`, `GET/PUT/DELETE /api/v1/webhooks/{id}`,
+  `GET /api/v1/webhooks/evenements`.
+- `POST /api/v1/webhooks/{id}/test` : envoie un événement `ping`.
+- `GET /api/v1/webhooks/{id}/livraisons`,
+  `POST /api/v1/webhooks/livraisons/{id}/renvoyer`.
+
+Événements : `client.cree`, `client.modifie`, `compte.cree`, `compte.modifie`
+(solde modifié par une transaction), `transaction.creee`, `document.ajoute`,
+`document.modifie`, `document.supprime`, `beneficiaire.ajoute`,
+`beneficiaire.modifie`, `beneficiaire.supprime`. Liste vide : tous.
+
+Chaque envoi est un `POST` JSON `{ id, evenement, date, donnees }`, où `donnees`
+reprend la ressource au format de lecture de l'API. L'en-tête
+`X-Simulateur-Signature` vaut `sha256=` suivi du HMAC-SHA256 du corps avec le
+secret ; `X-Simulateur-Evenement` et `X-Simulateur-Livraison` accompagnent
+l'envoi. L'envoi part en arrière-plan après la réponse ; sans réponse 2xx, il
+est retenté jusqu'à `WEBHOOK_TENTATIVES_MAX` fois (délai
+`WEBHOOK_DELAI_ENTRE_TENTATIVES_SECONDES`, croissant), puis marqué `echouee`.
 
 ## Tests
 

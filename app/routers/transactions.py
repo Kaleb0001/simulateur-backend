@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from .. import schemas
@@ -8,6 +8,7 @@ from ..crud import comptes as comptes_crud
 from ..crud import transactions as transactions_crud
 from ..database import get_db
 from ..security import get_current_consumer
+from ..webhooks import emettre
 
 # Pas de prefix commun : /api/v1/transactions (liste, détail) et
 # /api/v1/comptes/{...}/transactions (création) ne partagent pas de racine.
@@ -61,7 +62,10 @@ def obtenir_transaction(external_id: str, db: Session = Depends(get_db)) -> sche
     status_code=status.HTTP_201_CREATED,
 )
 def creer_transaction(
-    compte_external_id: str, payload: schemas.TransactionCreate, db: Session = Depends(get_db)
+    compte_external_id: str,
+    payload: schemas.TransactionCreate,
+    taches: BackgroundTasks,
+    db: Session = Depends(get_db),
 ) -> schemas.TransactionRead:
     compte = comptes_crud.get_compte_by_external_id(db, compte_external_id)
     if compte is None:
@@ -69,4 +73,11 @@ def creer_transaction(
     transaction = transactions_crud.creer_transaction(db, compte, payload)
     db.commit()
     db.refresh(transaction)
-    return transactions_crud.to_read(transaction)
+    lecture = transactions_crud.to_read(transaction)
+    emettre(db, taches, schemas.EvenementWebhook.transaction_creee, lecture.model_dump(mode="json"))
+    # Le solde a bougé : chaque compte touché est aussi annoncé.
+    for compte_touche in (transaction.compte, transaction.compte_destination):
+        if compte_touche is not None:
+            db.refresh(compte_touche)
+            emettre(db, taches, schemas.EvenementWebhook.compte_modifie, comptes_crud.to_read(compte_touche).model_dump(mode="json"))
+    return lecture
