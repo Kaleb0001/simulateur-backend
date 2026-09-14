@@ -21,7 +21,7 @@ def lister_journal_acces(
     decalage: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ) -> schemas.JournalAccesListResponse:
-    stmt = select(JournalAcces).order_by(JournalAcces.horodatage.desc())
+    stmt = select(JournalAcces).order_by(JournalAcces.horodatage.desc(), JournalAcces.id.desc())
     total, resultats = paginer(db, stmt, limite, decalage)
     return schemas.JournalAccesListResponse(
         total=total,

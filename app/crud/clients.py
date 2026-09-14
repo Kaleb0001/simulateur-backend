@@ -256,7 +256,7 @@ def lister_clients(
             )
         )
 
-    stmt = stmt.order_by(models.Client.updated_at.asc())
+    stmt = stmt.order_by(models.Client.updated_at.asc(), models.Client.id.asc())
 
     return paginer(db, stmt, limite, decalage)
 

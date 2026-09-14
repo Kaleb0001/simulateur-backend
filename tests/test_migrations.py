@@ -200,3 +200,111 @@ def test_adaptation_ajoute_les_cles_etrangeres(engine_ancienne_base):
     assert (("agence",), "agences") in cles
     assert (("profession",), "professions") in cles
 
+
+
+# --- Mise à niveau sous PostgreSQL -----------------------------------------
+#
+# Mêmes écarts que ci-dessus, traités par ALTER TABLE au lieu d'une
+# reconstruction. Les tables sont créées dans un schéma dédié de la base de
+# test, pour ne pas toucher celles des autres tests.
+
+SCHEMA_PG = "migrations_test"
+
+
+@pytest.fixture
+def engine_postgres():
+    import os
+
+    from sqlalchemy import make_url
+
+    from app.database import creer_engine
+
+    url = os.environ["DATABASE_URL"]
+    if not url.startswith("postgresql"):
+        pytest.skip("base de test non PostgreSQL")
+    administration = creer_engine(url)
+    with administration.begin() as connection:
+        connection.execute(text(f'DROP SCHEMA IF EXISTS "{SCHEMA_PG}" CASCADE'))
+        connection.execute(text(f'CREATE SCHEMA "{SCHEMA_PG}"'))
+    administration.dispose()
+
+    engine = create_engine(
+        make_url(url),
+        connect_args={"options": f"-c search_path={SCHEMA_PG} -c timezone=UTC"},
+    )
+    with engine.begin() as connection:
+        ancien = ANCIEN_SCHEMA_CLIENTS.replace("DATETIME", "TIMESTAMP").replace(
+            "id INTEGER NOT NULL PRIMARY KEY", "id SERIAL PRIMARY KEY"
+        )
+        connection.execute(text(ancien))
+        connection.execute(text("ALTER TABLE clients ALTER COLUMN statut DROP DEFAULT"))
+        connection.execute(text("ALTER TABLE clients ADD COLUMN source_revenus VARCHAR(120)"))
+        connection.execute(
+            text(
+                "INSERT INTO clients (id, external_id, type, statut, nom, prenoms, "
+                "nationalite, type_piece_identite, numero_piece_identite, adresse, "
+                "telephone, agence) VALUES (1, 'CL-EXT-0001', 'physique', 'actif', "
+                "'Kodjo', 'Mensah', 'Togolaise', 'CNI', 'TG-0192837', 'Lomé', "
+                "'+22890123456', 'Lomé-Centre')"
+            )
+        )
+        connection.execute(text("SELECT setval(pg_get_serial_sequence('clients', 'id'), 1)"))
+    yield engine
+    engine.dispose()
+    with administration.begin() as connection:
+        connection.execute(text(f'DROP SCHEMA IF EXISTS "{SCHEMA_PG}" CASCADE'))
+    administration.dispose()
+
+
+def _demarrage(engine):
+    """Enchaîne les fonctions appelées au démarrage par app/main.py."""
+    from app.migrations import normaliser_referentiels, supprimer_colonnes_retirees
+
+    Base.metadata.create_all(bind=engine)
+    adapter_schema(engine, cles_etrangeres=False)
+    supprimer_colonnes_retirees(engine)
+    peupler_referentiels(engine)
+    normaliser_referentiels(engine)
+    adapter_schema(engine)
+
+
+def test_postgres_mise_a_niveau_complete(engine_postgres):
+    _demarrage(engine_postgres)
+    inspecteur = inspect(engine_postgres)
+    colonnes = {c["name"]: c for c in inspecteur.get_columns("clients")}
+
+    assert "numero_cuce" in colonnes and "latitude" in colonnes
+    assert "source_revenus" not in colonnes
+    assert colonnes["numero_piece_identite"]["nullable"]
+    assert colonnes["statut"]["default"] is not None
+    cles = {
+        (tuple(cle["constrained_columns"]), cle["referred_table"])
+        for cle in inspecteur.get_foreign_keys("clients")
+    }
+    assert (("agence",), "agences") in cles
+    assert (("profession",), "professions") in cles
+
+    with engine_postgres.begin() as connection:
+        ligne = connection.execute(
+            text("SELECT external_id, nom, agence, ppe_est_ppe_ou_proche FROM clients")
+        ).one()
+        connection.execute(
+            text(
+                "INSERT INTO clients (external_id, type, nom, nationalite, adresse, "
+                "telephone, agence) VALUES ('CL-EXT-0002', 'morale', 'Sogex', "
+                "'Togolaise', 'Lomé', '+228', 'lome_port')"
+            )
+        )
+        nouveau = connection.execute(
+            text("SELECT statut, created_at FROM clients WHERE external_id = 'CL-EXT-0002'")
+        ).one()
+
+    assert tuple(ligne) == ("CL-EXT-0001", "Kodjo", "lome_centre", False)
+    assert nouveau[0] == "actif" and nouveau[1] is not None
+
+
+def test_postgres_demarrage_idempotent(engine_postgres):
+    _demarrage(engine_postgres)
+
+    assert adapter_schema(engine_postgres) == []
+    assert peupler_referentiels(engine_postgres) == []

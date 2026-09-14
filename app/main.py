@@ -1,7 +1,8 @@
 from fastapi import FastAPI
 
 from .database import Base, engine
-from .middleware import JournalAccesMiddleware
+from .config import get_settings
+from .middleware import JournalAccesMiddleware, LimiteRequetesSimultanees
 from .migrations import (
     adapter_schema,
     normaliser_referentiels,
@@ -11,10 +12,13 @@ from .migrations import (
 from .routers import clients, comptes, connexions, journal, referentiels, transactions, webhooks
 
 Base.metadata.create_all(bind=engine)
-adapter_schema(engine)
+adapter_schema(engine, cles_etrangeres=False)
 supprimer_colonnes_retirees(engine)
 peupler_referentiels(engine)
 normaliser_referentiels(engine)
+# Sous PostgreSQL, les clés étrangères manquantes ne se posent qu'une fois
+# les anciennes valeurs ramenées aux référentiels.
+adapter_schema(engine)
 
 app = FastAPI(
     title="Simulateur de système de gestion interne d'IMF",
@@ -28,6 +32,8 @@ app = FastAPI(
 )
 
 app.add_middleware(JournalAccesMiddleware)
+# Ajouté en dernier, donc le plus à l'extérieur : il englobe le journal.
+app.add_middleware(LimiteRequetesSimultanees, maximum=get_settings().requetes_simultanees_max)
 
 app.include_router(clients.router)
 app.include_router(comptes.router)

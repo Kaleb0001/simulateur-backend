@@ -1,4 +1,4 @@
-"""Mise à niveau automatique d'une base SQLite existante.
+"""Mise à niveau automatique d'une base existante (PostgreSQL ou SQLite).
 
 Le schéma est créé au démarrage par `create_all`, qui ne sait que créer les
 tables manquantes : une base ouverte avec une version antérieure du modèle
@@ -9,9 +9,10 @@ démarrage, sans perdre les données.
 Deux écarts sont traités :
 
 - colonne présente dans le modèle mais absente de la base → ajoutée ;
-- colonne NOT NULL en base alors que le modèle l'autorise vide, ou clé
-  étrangère déclarée par le modèle mais absente de la base → la table est
-  reconstruite, SQLite ne sachant modifier ni l'une ni l'autre.
+- colonne NOT NULL en base alors que le modèle l'autorise vide, valeur par
+  défaut manquante, ou clé étrangère déclarée par le modèle mais absente de
+  la base → sous PostgreSQL, un ALTER TABLE suffit ; sous SQLite, qui ne
+  sait modifier ni l'une ni l'autre, la table est reconstruite.
 
 Ce n'est pas un remplaçant d'Alembic : une colonne retirée du modèle est
 laissée en place, et une colonne obligatoire ajoutée sans valeur par défaut
@@ -30,14 +31,16 @@ from .database import Base
 logger = logging.getLogger(__name__)
 
 
-def adapter_schema(engine: Engine) -> list[str]:
+def adapter_schema(engine: Engine, cles_etrangeres: bool = True) -> list[str]:
     """Aligne les tables déjà présentes en base sur le modèle courant.
+
+    Hors SQLite, une clé étrangère n'est posée que si les données existantes
+    la respectent : `cles_etrangeres=False` la remet à un second appel, fait
+    après la normalisation des référentiels (voir app/main.py). SQLite ne
+    vérifiant pas les données à la reconstruction, l'option y est sans effet.
 
     Renvoie la liste des opérations effectuées, pour affichage au démarrage.
     """
-    if engine.dialect.name != "sqlite":
-        return []
-
     inspecteur = inspect(engine)
     tables_existantes = set(inspecteur.get_table_names())
     operations: list[str] = []
@@ -50,13 +53,17 @@ def adapter_schema(engine: Engine) -> list[str]:
             colonne["name"]: colonne for colonne in inspecteur.get_columns(table.name)
         }
 
-        if _reconstruction_necessaire(table, colonnes_base) or _cles_etrangeres_manquantes(
-            table, inspecteur
-        ):
-            _reconstruire_table(engine, table, colonnes_base)
-            operations.append(f"table « {table.name} » reconstruite")
-            continue
+        if engine.dialect.name == "sqlite":
+            if _reconstruction_necessaire(table, colonnes_base) or _cles_etrangeres_manquantes(
+                table, inspecteur
+            ):
+                _reconstruire_table(engine, table, colonnes_base)
+                operations.append(f"table « {table.name} » reconstruite")
+                continue
+        else:
+            operations += _modifier_colonnes(engine, table, colonnes_base, cles_etrangeres)
 
+        ajoutees = False
         for colonne in table.columns:
             if colonne.name in colonnes_base:
                 continue
@@ -69,11 +76,87 @@ def adapter_schema(engine: Engine) -> list[str]:
                 )
                 continue
             _ajouter_colonne(engine, table, colonne)
+            ajoutees = True
             operations.append(f"colonne « {table.name}.{colonne.name} » ajoutée")
+
+        if engine.dialect.name != "sqlite" and cles_etrangeres and ajoutees:
+            operations += _ajouter_cles_etrangeres(engine, table, inspect(engine))
 
     for operation in operations:
         logger.info("Schéma mis à niveau : %s", operation)
 
+    return operations
+
+
+def _modifier_colonnes(
+    engine: Engine, table: Table, colonnes_base: dict, cles_etrangeres: bool
+) -> list[str]:
+    """Équivalent PostgreSQL de la reconstruction SQLite : lève les NOT NULL
+    que le modèle n'impose plus, pose les valeurs par défaut manquantes et
+    ajoute les clés étrangères absentes, sans recopier la table."""
+    operations: list[str] = []
+    compilateur = engine.dialect.ddl_compiler(engine.dialect, None)
+    with engine.begin() as connection:
+        for colonne in table.columns:
+            colonne_base = colonnes_base.get(colonne.name)
+            if colonne_base is None:
+                continue
+            if colonne.nullable and not colonne_base["nullable"]:
+                connection.execute(
+                    text(f'ALTER TABLE "{table.name}" ALTER COLUMN "{colonne.name}" DROP NOT NULL')
+                )
+                operations.append(f"colonne « {table.name}.{colonne.name} » rendue facultative")
+            if colonne.server_default is not None and colonne_base["default"] is None:
+                defaut = compilateur.get_column_default_string(colonne)
+                connection.execute(
+                    text(
+                        f'ALTER TABLE "{table.name}" ALTER COLUMN "{colonne.name}" '
+                        f"SET DEFAULT {defaut}"
+                    )
+                )
+                operations.append(
+                    f"valeur par défaut de « {table.name}.{colonne.name} » restaurée"
+                )
+    if cles_etrangeres:
+        operations += _ajouter_cles_etrangeres(engine, table, inspect(engine))
+    return operations
+
+
+def _ajouter_cles_etrangeres(engine: Engine, table: Table, inspecteur) -> list[str]:
+    """Ajoute (hors SQLite) les clés étrangères du modèle absentes en base.
+    Une clé que les données existantes violent est signalée, pas imposée."""
+    en_base = {
+        (tuple(cle["constrained_columns"]), cle["referred_table"])
+        for cle in inspecteur.get_foreign_keys(table.name)
+    }
+    colonnes_base = {colonne["name"] for colonne in inspecteur.get_columns(table.name)}
+    operations: list[str] = []
+    for cle in table.foreign_key_constraints:
+        colonnes = tuple(colonne.name for colonne in cle.columns)
+        if (colonnes, cle.referred_table.name) in en_base or not set(colonnes) <= colonnes_base:
+            continue
+        locales = ", ".join(f'"{nom}"' for nom in colonnes)
+        references = ", ".join(f'"{element.column.name}"' for element in cle.elements)
+        try:
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        f'ALTER TABLE "{table.name}" ADD FOREIGN KEY ({locales}) '
+                        f'REFERENCES "{cle.referred_table.name}" ({references})'
+                    )
+                )
+        except Exception as erreur:  # données existantes incompatibles
+            logger.warning(
+                "Clé étrangère %s.%s → %s non ajoutée : %s",
+                table.name,
+                ", ".join(colonnes),
+                cle.referred_table.name,
+                erreur,
+            )
+            continue
+        operations.append(
+            f"clé étrangère « {table.name}.{', '.join(colonnes)} » ajoutée"
+        )
     return operations
 
 
@@ -197,7 +280,7 @@ _COLONNES_RETIREES = {
 
 def supprimer_colonnes_retirees(engine: Engine) -> list[str]:
     """Supprime les colonnes qu'un champ retiré du modèle a laissées en base
-    (SQLite 3.35 ou plus récent)."""
+    (PostgreSQL, ou SQLite 3.35 ou plus récent)."""
     inspecteur = inspect(engine)
     operations: list[str] = []
     for table, colonnes in _COLONNES_RETIREES.items():
@@ -300,8 +383,11 @@ def _normaliser_agences(engine: Engine) -> list[str]:
             if cible is None:
                 cible = cle or "inconnue"
                 connection.execute(
-                    text("INSERT INTO agences (code, nom, active, ordre) VALUES (:code, :nom, 1, 999)"),
-                    {"code": cible, "nom": valeur.strip() or cible},
+                    text(
+                        "INSERT INTO agences (code, nom, active, ordre) "
+                        "VALUES (:code, :nom, :active, 999)"
+                    ),
+                    {"code": cible, "nom": valeur.strip() or cible, "active": True},
                 )
                 agences[cible] = valeur
                 par_nom[cle] = cible

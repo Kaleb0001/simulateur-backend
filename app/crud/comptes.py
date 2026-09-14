@@ -76,7 +76,7 @@ def lister_comptes(
     if modifie_depuis is not None:
         stmt = stmt.where(models.Compte.updated_at >= modifie_depuis)
 
-    stmt = stmt.order_by(models.Compte.updated_at.asc())
+    stmt = stmt.order_by(models.Compte.updated_at.asc(), models.Compte.id.asc())
 
     return paginer(db, stmt, limite, decalage)
 

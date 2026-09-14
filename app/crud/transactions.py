@@ -136,7 +136,7 @@ def lister_transactions(
     if modifie_depuis is not None:
         stmt = stmt.where(models.Transaction.updated_at >= modifie_depuis)
 
-    stmt = stmt.order_by(models.Transaction.updated_at.asc())
+    stmt = stmt.order_by(models.Transaction.updated_at.asc(), models.Transaction.id.asc())
 
     return paginer(db, stmt, limite, decalage)
 

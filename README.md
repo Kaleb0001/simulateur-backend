@@ -1,6 +1,6 @@
 # Simulateur de système de gestion interne d'IMF
 
-API backend (FastAPI + SQLite) simulant l'outil de gestion interne d'une
+API backend (FastAPI + PostgreSQL) simulant l'outil de gestion interne d'une
 Institution de Microfinance : clients (dossier KYC), comptes et
 transactions. Ce système est **indépendant de Vigie** : il expose ses données via une API REST
 protégée par clé API. Un consommateur externe (Vigie) peut interroger cette
@@ -28,10 +28,12 @@ Un fichier `.env` est déjà présent avec un jeton de démo
 liste toutes les variables disponibles.
 
 > **Schéma de base de données.** Le schéma est créé au démarrage
-> (`create_all`) et une base SQLite plus ancienne est **mise à niveau
-> automatiquement**, sans perte de données : les colonnes manquantes sont
-> ajoutées, et la table est reconstruite lorsque SQLite ne sait pas faire
-> autrement (contrainte `NOT NULL` à lever, valeur par défaut à poser).
+> (`create_all`) et une base plus ancienne est **mise à niveau
+> automatiquement**, sans perte de données : les colonnes manquantes sont
+> ajoutées ; sous PostgreSQL, un `ALTER TABLE` lève une contrainte `NOT NULL`,
+> pose une valeur par défaut ou ajoute une clé étrangère ; sous SQLite, qui ne
+> sait pas le faire, la table est reconstruite.
+>
 > Rien à supprimer ni à recréer à la main après un `git pull`. Voir
 > `app/migrations.py` — ce n'est pas un remplaçant d'Alembic, juste le
 > nécessaire pour qu'une base de démonstration survive à l'évolution du
@@ -75,11 +77,60 @@ Deux sortes de jetons sont acceptées :
 | `DEVISE_PAR_DEFAUT` | Devise par défaut des comptes | `XOF` |
 | `SOLDE_INITIAL_PAR_DEFAUT` | Solde initial des comptes | `0` |
 | `PREFIXE_NUMERO_COMPTE` | Préfixe du numéro de compte auto-généré | `CPT` |
-| `DATABASE_URL` | URL SQLAlchemy | `sqlite:///./simulateur_imf.db` |
+| `DATABASE_URL` | URL SQLAlchemy (PostgreSQL, voir « Base de données ») | `sqlite:///./simulateur_imf.db` |
 | `URL_PUBLIQUE_API` | Adresse de l'API renvoyée à un système tiers connecté | `http://127.0.0.1:8011/api/v1` |
 | `WEBHOOK_TIMEOUT_SECONDES` | Délai maximal d'un envoi de webhook | `5` |
 | `WEBHOOK_TENTATIVES_MAX` | Tentatives avant d'abandonner un envoi | `3` |
 | `WEBHOOK_DELAI_ENTRE_TENTATIVES_SECONDES` | Délai de base entre deux tentatives | `2` |
+
+## Base de données
+
+Le simulateur utilise PostgreSQL. Le serveur tourne dans Docker, avec celui
+d'IMF SHIELD : voir `IMF_SHIELD/infra/postgres` (port `5434`, base
+`simulateur_imf`, utilisateur `simulateur`, mot de passe dans le `.env` de ce
+dossier, non versionné).
+
+```bash
+cd ../../infra/postgres && docker compose up -d
+```
+
+Dans `.env` du simulateur :
+
+```
+DATABASE_URL=postgresql+psycopg://simulateur:<mot de passe>@localhost:5434/simulateur_imf
+```
+
+Les formes `postgresql://` et `postgres://` sont acceptées et ramenées au
+pilote psycopg 3. Un mot de passe contenant des caractères spéciaux doit être
+encodé pour l'URL (`%40` pour `@`, par exemple). Une URL `sqlite:///...`
+fonctionne toujours, pour un essai sans serveur.
+
+Réglages du pool de connexions et de la charge (valeurs par défaut adaptées
+à la démo) : `DATABASE_POOL_SIZE` (`20`), `DATABASE_MAX_OVERFLOW` (`30`),
+`DATABASE_POOL_TIMEOUT_SECONDES` (`10`) et `REQUETES_SIMULTANEES_MAX` (`15`).
+Au-delà de ce dernier nombre, les requêtes attendent leur tour au lieu
+d'épuiser le pool (voir `app/middleware.py`).
+
+### Reprise d'une base SQLite
+
+`scripts/sqlite_vers_postgres.py` recopie toutes les tables d'une base SQLite
+du simulateur vers PostgreSQL, en conservant les identifiants internes et
+externes, puis recale les séquences sur `max(id) + 1` et vérifie le nombre de
+lignes table par table. La copie tient en une transaction : en cas d'erreur,
+la cible reste intacte.
+
+```bash
+../.venv-backend/bin/python scripts/sqlite_vers_postgres.py \
+    --source sqlite:///../simulateur_imf.db \
+    --cible "postgresql://simulateur:<mot de passe>@localhost:5434/simulateur_imf"
+```
+
+Sans argument, la source est `simulateur/simulateur_imf.db` et la cible
+`DATABASE_URL`. Le script refuse d'écrire dans une base qui contient déjà des
+lignes (un simulateur démarré dessus y a par exemple inséré les
+référentiels) ; `--remplacer` vide d'abord ses tables. La base SQLite
+d'origine n'est pas modifiée ; une copie de celle d'avant la bascule est
+conservée dans `simulateur/simulateur_imf-avant-postgres.db`.
 
 ## Endpoints
 
@@ -406,6 +457,20 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
+Les tests tournent sur la base PostgreSQL `simulateur_imf_test` (créée par
+`infra/postgres`), dont toutes les tables sont supprimées puis recréées au
+début de chaque session. Son URL vient de `TEST_DATABASE_URL` ; à défaut,
+elle est déduite de `DATABASE_URL` en remplaçant le nom de la base. Par
+sécurité, seule une base dont le nom finit par `_test` est vidée.
+
+```bash
+TEST_DATABASE_URL="postgresql://simulateur:<mot de passe>@localhost:5434/simulateur_imf_test" pytest
+```
+
+Les tests de mise à niveau d'une base SQLite (`tests/test_migrations.py`)
+travaillent sur des fichiers SQLite temporaires ; ceux de la mise à niveau
+sous PostgreSQL, dans un schéma dédié de la base de test.
+
 Les tests couvrent : authentification, création de client avec compte
 auto-créé, unicité de la pièce d'identité, CRUD des sous-ressources
 (documents, bénéficiaires effectifs), ouverture de compte additionnel,
@@ -423,9 +488,11 @@ app/
   schemas.py        # schémas Pydantic (entrée/sortie API)
   security.py       # authentification par clé API
   middleware.py     # journal des accès
-  migrations.py     # mise à niveau d'une base SQLite plus ancienne
+  migrations.py     # mise à niveau d'une base plus ancienne (PostgreSQL ou SQLite)
   utils.py          # génération d'identifiants, pagination
   crud/             # logique métier par ressource
   routers/          # endpoints FastAPI par ressource
+scripts/
+  sqlite_vers_postgres.py  # copie d'une base SQLite vers PostgreSQL
 tests/              # tests d'API et de migration (pytest + TestClient)
 ```
